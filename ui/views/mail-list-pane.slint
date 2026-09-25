@@ -212,7 +212,6 @@ export component MailListPane inherits Rectangle {
     callback message_action_for_email(int, string);
     callback bulk_message_action(string);
     callback toggle_mail_group(string);
-    callback request_empty_trash();
     callback set_email_checked(int, bool);
     callback set_all_emails_checked(bool);
 
@@ -319,20 +318,6 @@ export component MailListPane inherits Rectangle {
                             edited(text) => { root.search_changed(text); }
                             filter-selected(value) => { root.set_search_filter(value); }
                             refresh => { root.sync_mail(); }
-                        }
-                    }
-
-                    if root.trash_view && !root.selection-mode : Rectangle {
-                        height: 44px;
-                        background: root.surface;
-                        Button {
-                            width: 144px;
-                            x: parent.width - self.width - (root.compact ? LayoutMetrics.compact-inset : LayoutMetrics.content-inset);
-                            y: 5px;
-                            height: 34px;
-                            text: @tr("Empty Trash…");
-                            destructive: true;
-                            clicked => { root.request_empty_trash(); }
                         }
                     }
 

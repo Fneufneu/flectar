@@ -6,6 +6,7 @@ import { MailAttachments, EmailReader, EmailLink, EmailTile, MailLabelRow, Threa
 import { Avatar } from "../components/avatar.slint";
 import { Button } from "../components/button.slint";
 import { IconButton, LineEdit, TextEdit, ToolbarIconButton } from "../components/controls.slint";
+import { DetailEmptyState } from "../components/detail-empty-state.slint";
 import { EmailLinkContextArea } from "../components/email-link-context-area.slint";
 import { FocusVisibleScope } from "../components/focus-visible-scope.slint";
 import { LoadingSkeletonBlock } from "../components/loading-skeleton.slint";
@@ -341,6 +342,7 @@ export component MailReadingPane inherits Rectangle {
     in property <bool> selected_unread: false;
     in property <bool> selected_is_draft: false;
     in property <bool> trash_view: false;
+    callback request_empty_trash();
     in property <string> selected_sender_verification: "";
     in property <bool> remote-images-blocked: false;
     in property <bool> print_supported: true;
@@ -572,6 +574,7 @@ export component MailReadingPane inherits Rectangle {
                 background: root.surface-raised;
 
                 VerticalBox {
+                    visible: root.has_selected;
                     padding: 0px;
                     spacing: 0px;
 
@@ -1720,12 +1723,16 @@ export component MailReadingPane inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
                     background: root.surface-raised;
-                    VerticalBox {
-                        padding-top: 170px;
-                        padding-left: 32px;
-                        spacing: 6px;
-                        Text { text: @tr("No message selected"); color: root.heading; font-size: TypeScale.heading-large; font-weight: 700; }
-                        Text { text: @tr("Choose an email to read it here."); color: root.muted-text; font-size: TypeScale.secondary; }
+                    DetailEmptyState {
+                        width: parent.width;
+                        height: parent.height;
+                        icon: root.trash_view ? @image-url("../icons/lucide/outline/trash.svg") : @image-url("../icons/lucide/outline/mail-open.svg");
+                        title: @tr("No message selected");
+                        description: @tr("Choose an email to read it here.");
+                        action-label: root.trash_view ? @tr("Empty Trash…") : "";
+                        action-icon: @image-url("../icons/lucide/outline/trash.svg");
+                        action-destructive: true;
+                        action => { root.request_empty_trash(); }
                     }
                 }
 

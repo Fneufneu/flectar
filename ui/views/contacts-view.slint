@@ -3,6 +3,7 @@ import { HorizontalBox, ListView, ScrollView, VerticalBox } from "std-widgets.sl
 import { ContactSidebarRow, ContactSidebarRowKind, ContactRow } from "../models.slint";
 import { Avatar } from "../components/avatar.slint";
 import { Button } from "../components/button.slint";
+import { DetailEmptyState } from "../components/detail-empty-state.slint";
 import { FloatingActionButton, LineEdit, TextEdit, ToolbarIconButton } from "../components/controls.slint";
 import { SidebarItem, SidebarSectionHeader } from "../components/sidebar-controls.slint";
 import { TypeScale } from "../typography.slint";
@@ -735,22 +736,15 @@ export component ContactsView inherits Rectangle {
                 }
             }
 
-            if !root.has-selected : VerticalBox {
+            if !root.has-selected : DetailEmptyState {
                 width: parent.width;
                 height: parent.height;
-                alignment: center;
-                spacing: 8px;
-                Image {
-                    width: 44px;
-                    height: 44px;
-                    source: @image-url("../icons/lucide/outline/people.svg");
-                    colorize: root.muted-text;
-                    image-fit: contain;
-                    accessible-role: none;
-                }
-                Text { text: @tr("Select a contact"); color: root.heading; font-size: TypeScale.heading; font-weight: 700; horizontal-alignment: center; }
-                Text { text: @tr("View and edit contact details here."); color: root.muted-text; font-size: TypeScale.secondary; horizontal-alignment: center; }
-                Button { text: @tr("New contact"); clicked => { root.new-contact(); } }
+                icon: @image-url("../icons/lucide/outline/people.svg");
+                title: @tr("Select a contact");
+                description: @tr("View and edit contact details here.");
+                action-label: @tr("New contact");
+                action-icon: @image-url("../icons/lucide/filled/person-add.svg");
+                action => { root.new-contact(); }
             }
         }
     }

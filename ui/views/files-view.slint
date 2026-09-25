@@ -5,6 +5,7 @@ import { HorizontalBox, VerticalBox, ListView, ScrollView, ComboBox, CheckBox } 
 import { AppTheme, LayoutMetrics } from "../design-system.slint";
 import { TypeScale } from "../typography.slint";
 import { Button } from "../components/button.slint";
+import { DetailEmptyState } from "../components/detail-empty-state.slint";
 import { AccountRow } from "../models.slint";
 import { SidebarItem, SidebarSectionHeader } from "../components/sidebar-controls.slint";
 import { CollapsibleWorkspaceSidebar, WorkspaceMiniHeading, WorkspacePaneResizeHandle, WorkspaceTitleRow, WorkspaceSearchToolbar, WorkspaceSearchFilter } from "../components/workspace-layout.slint";
@@ -459,11 +460,11 @@ export component FilesView inherits Rectangle {
                         Rectangle { horizontal-stretch: 1; }
                     }
                 }
-                if !FilesUi.preview-open : VerticalBox {
-                    alignment: center; spacing: 12px;
-                    Image { source: @image-url("../icons/lucide/outline/files.svg"); width: 40px; height: 40px; colorize: AppTheme.muted; }
-                    Text { text: @tr("Select a file to preview"); color: AppTheme.heading; horizontal-alignment: center; font-size: TypeScale.title-small; }
-                    Text { text: FilesUi.pdf-supported ? @tr("PDFs, images and text appear here. Other formats can be downloaded.") : @tr("Images and text appear here. Other formats can be downloaded."); wrap: word-wrap; color: AppTheme.secondary; horizontal-alignment: center; }
+                if !FilesUi.preview-open : DetailEmptyState {
+                    vertical-stretch: 1;
+                    icon: @image-url("../icons/lucide/outline/files.svg");
+                    title: @tr("Select a file to preview");
+                    description: FilesUi.pdf-supported ? @tr("PDFs, images and text appear here. Other formats can be downloaded.") : @tr("Images and text appear here. Other formats can be downloaded.");
                 }
                 if FilesUi.preview-open && FilesUi.busy : Text { text: FilesUi.transfer-status != "" ? FilesUi.transfer-status : @tr("Loading preview…"); color: AppTheme.secondary; wrap: word-wrap; }
                 if FilesUi.preview-open && FilesUi.activity-open : Button { text: @tr("Clear displayed activity"); enabled: !FilesUi.busy; clicked => { FilesUi.command("clear-notifications", "", ""); } }

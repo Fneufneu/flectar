@@ -257,7 +257,6 @@ export component MailView inherits Rectangle {
                 }
                 bulk_message_action(action) => { root.bulk_message_action(action); }
                 toggle_mail_group(key) => { root.toggle_mail_group(key); }
-                request_empty_trash => { root.request_empty_trash(-1); }
                 set_email_checked(id, checked) => { root.set_email_checked(id, checked); }
                 set_all_emails_checked(checked) => { root.set_all_emails_checked(checked); }
             }
@@ -317,6 +316,7 @@ export component MailView inherits Rectangle {
                 selected_unread: root.selected_unread;
                 selected_is_draft: root.selected_is_draft;
                 trash_view: root.trash_view;
+                request_empty_trash => { root.request_empty_trash(-1); }
                 selected_sender_verification: root.selected_sender_verification;
                 remote-images-blocked: root.remote-images-blocked;
                 text_mode <=> root.text_mode;
@@ -489,7 +489,6 @@ export component MailView inherits Rectangle {
                 }
                 bulk_message_action(action) => { root.bulk_message_action(action); }
                 toggle_mail_group(key) => { root.toggle_mail_group(key); }
-                request_empty_trash => { root.request_empty_trash(-1); }
                 set_email_checked(id, checked) => { root.set_email_checked(id, checked); }
                 set_all_emails_checked(checked) => { root.set_all_emails_checked(checked); }
             }
@@ -539,6 +538,7 @@ export component MailView inherits Rectangle {
                 selected_unread: root.selected_unread;
                 selected_is_draft: root.selected_is_draft;
                 trash_view: root.trash_view;
+                request_empty_trash => { root.request_empty_trash(-1); }
                 selected_sender_verification: root.selected_sender_verification;
                 remote-images-blocked: root.remote-images-blocked;
                 text_mode <=> root.text_mode;
