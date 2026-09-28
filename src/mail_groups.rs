@@ -118,8 +118,8 @@ pub(super) fn mail_group_key(timestamp_ms: i64, now: DateTime<Local>) -> String 
     date_group(timestamp_ms, now).key
 }
 
-pub(super) fn project_mail_list(
-    messages: &[MailMessage],
+pub(super) fn project_mail_list<M: std::borrow::Borrow<MailMessage>>(
+    messages: &[M],
     rows: &[EmailRow],
     groups: &MailGroupState,
     group_by_date: bool,
@@ -128,7 +128,11 @@ pub(super) fn project_mail_list(
     debug_assert_eq!(messages.len(), rows.len());
     // Legacy warm-start snapshots have display text but no timestamps. Keep
     // their short-lived preview flat until the core supplies real dates.
-    if !group_by_date || messages.iter().all(|message| message.date_ms <= 0) {
+    if !group_by_date
+        || messages
+            .iter()
+            .all(|message| std::borrow::Borrow::borrow(message).date_ms <= 0)
+    {
         return rows
             .iter()
             .enumerate()
@@ -142,6 +146,7 @@ pub(super) fn project_mail_list(
     let mut ordered = Vec::<(DateGroup, i64, Vec<&EmailRow>)>::new();
     let mut group_indices = HashMap::<String, usize>::new();
     for (message, row) in messages.iter().zip(rows) {
+        let message = std::borrow::Borrow::borrow(message);
         let group = date_group(message.date_ms, now);
         if let Some(&index) = group_indices.get(&group.key) {
             let (_, latest, group_rows) = &mut ordered[index];

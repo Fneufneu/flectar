@@ -17,7 +17,7 @@ use flectar_mail_core::{
 #[cfg(test)]
 use pulldown_cmark::{Event, Tag, TagEnd};
 use pulldown_cmark::{Options, Parser, html};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
@@ -2060,15 +2060,15 @@ fn summary_to_message(
     // A conversation can be visible in Inbox and Sent at the same time. Keep
     // the row identified by the people on the other side of the exchange so a
     // newly sent reply does not make an Inbox row look like mail from oneself.
-    let own_addresses = thread
-        .account_addresses
-        .iter()
-        .map(|email| email.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
     let mut display_participants = thread
         .participants
         .iter()
-        .filter(|person| !own_addresses.contains(&person.email.to_ascii_lowercase()))
+        .filter(|person| {
+            !thread
+                .account_addresses
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(&person.email))
+        })
         .collect::<Vec<_>>();
     if display_participants.is_empty() {
         display_participants.extend(thread.participants.iter());
@@ -2077,21 +2077,23 @@ fn summary_to_message(
     let address = participant
         .map(|person| person.email.clone())
         .unwrap_or_default();
-    let participant_names = display_participants
-        .iter()
-        .map(|person| {
-            person
-                .name
-                .clone()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| person.email.clone())
-        })
-        .collect::<Vec<_>>();
-    let sender = match participant_names.as_slice() {
+    fn display_name(person: &Address) -> &str {
+        person
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&person.email)
+    }
+    let sender = match display_participants.as_slice() {
         [] => address.clone(),
-        [only] => only.clone(),
-        [first, second] => format!("{first}, {second}"),
-        [first, second, rest @ ..] => format!("{first}, {second} +{}", rest.len()),
+        [only] => display_name(only).to_owned(),
+        [first, second] => format!("{}, {}", display_name(first), display_name(second)),
+        [first, second, rest @ ..] => format!(
+            "{}, {} +{}",
+            display_name(first),
+            display_name(second),
+            rest.len()
+        ),
     };
     let account = accounts
         .iter()
@@ -2100,16 +2102,17 @@ fn summary_to_message(
         .unwrap_or_else(|| thread.account_email.clone());
     let domain = domain_from_address(&address).unwrap_or_default();
 
+    let initials = initials(&sender);
     Some(MailMessage {
         id,
         thread_id: Some(thread.id),
         account_id: thread.account_id,
         account,
         folder: folder.to_owned(),
-        sender: sender.clone(),
+        sender,
         address,
         domain,
-        initials: initials(&sender),
+        initials,
         subject: display_thread_subject(&thread.subject),
         preview: thread.snippet,
         time: relative_time(thread.last_message_at),
@@ -2173,29 +2176,32 @@ fn display_thread_subject(subject: &str) -> String {
     }
 }
 
-fn detail_to_message(row: &MailMessage, message: &MessageDetail) -> MailMessage {
+fn detail_to_message(row: &MailMessage, message: &MessageDetail, body_loaded: bool) -> MailMessage {
     let sender = message
         .from
         .name
         .clone()
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| message.from.email.clone());
-    let html = Some(readable_message_html(
-        message.html_body.as_deref(),
-        message.text_body.as_deref(),
-        &message.snippet,
-    ));
+    let html = body_loaded.then(|| {
+        readable_message_html(
+            message.html_body.as_deref(),
+            message.text_body.as_deref(),
+            &message.snippet,
+        )
+    });
 
+    let initials = initials(&sender);
     MailMessage {
         id: row.id,
         thread_id: row.thread_id,
         account_id: row.account_id,
         account: row.account.clone(),
         folder: row.folder.clone(),
-        sender: sender.clone(),
+        sender,
         address: message.from.email.clone(),
         domain: domain_from_address(&message.from.email).unwrap_or_default(),
-        initials: initials(&sender),
+        initials,
         subject: message.subject.clone(),
         preview: message.snippet.clone(),
         time: relative_time(message.date),
@@ -2218,12 +2224,20 @@ fn detail_to_message(row: &MailMessage, message: &MessageDetail) -> MailMessage 
         starred: row.starred,
         has_attachments: !message.attachments.is_empty(),
         message_count: row.message_count,
-        attachments: message.attachments.clone(),
+        attachments: if body_loaded {
+            message.attachments.clone()
+        } else {
+            Vec::new()
+        },
         has_replied: row.has_replied,
         is_outgoing: message.is_outgoing,
         labels: row.labels.clone(),
         html,
-        text: message.text_body.clone(),
+        text: if body_loaded {
+            message.text_body.clone()
+        } else {
+            None
+        },
         body_pending: message.body_state != "cached",
         sender_verification: message.sender_verification.as_str().to_owned(),
     }
@@ -2234,17 +2248,12 @@ fn detail_to_conversation_message(
     message: &MessageDetail,
     body_loaded: bool,
 ) -> Option<MailMessage> {
-    let mut projected = detail_to_message(row, message);
+    let mut projected = detail_to_message(row, message, body_loaded);
     projected.id = i32::try_from(message.id).ok()?;
     projected.thread_id = Some(message.thread_id);
     projected.account_id = message.account_id;
     projected.message_count = 1;
     projected.is_outgoing = message.is_outgoing;
-    if !body_loaded {
-        projected.html = None;
-        projected.text = None;
-        projected.attachments.clear();
-    }
     Some(projected)
 }
 
@@ -2779,7 +2788,7 @@ mod tests {
                 id: 22,
                 account_id: 1,
                 account_email: "person@example.com".into(),
-                account_addresses: vec!["person@example.com".into()],
+                account_addresses: vec!["PERSON@EXAMPLE.COM".into()],
                 subject: "Re: Launch review".into(),
                 snippet: "Tuesday works for everyone.".into(),
                 participants: vec![

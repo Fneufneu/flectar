@@ -3991,7 +3991,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     let removal_metadata_requested = mail_metadata_refresh_requested.clone();
     app.on_drain_ui_task_updates(move || {
         loop {
-            let update = match ui_task_rx.borrow_mut().try_recv() {
+            let mut update = match ui_task_rx.borrow_mut().try_recv() {
                 Ok(update) => update,
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             };
@@ -4012,12 +4012,13 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                     tray.set_enabled(enabled);
                 }
             }
-            let removed = update
+            let removed_account_id = update
                 .account_removal
                 .as_ref()
-                .filter(|removal| removal.removed);
-            if let Some(removal) = removed {
-                reconcile_removed_account(&mut ui_task_state.borrow_mut(), removal.account_id);
+                .filter(|removal| removal.removed)
+                .map(|removal| removal.account_id);
+            if let Some(account_id) = removed_account_id {
+                reconcile_removed_account(&mut ui_task_state.borrow_mut(), account_id);
                 removal_body_pending.set(None);
                 removal_pagination_generation
                     .set(removal_pagination_generation.get().wrapping_add(1));
@@ -4029,11 +4030,11 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                 removal_contacts_loading.set(false);
                 {
                     let mut contacts = removal_contacts.borrow_mut();
-                    if contacts.scope == format!("Account:{}", removal.account_id) {
+                    if contacts.scope == format!("Account:{account_id}") {
                         contacts.scope = "All contacts".into();
                     }
                     contacts.begin_core_query();
-                    contacts.account_counts.remove(&removal.account_id);
+                    contacts.account_counts.remove(&account_id);
                     contacts.total_count = 0;
                     contacts.favorite_count = 0;
                 }
@@ -4041,7 +4042,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                     let mut calendar = removal_calendar.borrow_mut();
                     if removal_calendar_editing.get().is_some_and(|id| {
                         calendar.events.iter().any(|event| {
-                            i64::from(event.id) == id && event.account_id == removal.account_id
+                            i64::from(event.id) == id && event.account_id == account_id
                         })
                     }) {
                         removal_calendar_editing.set(None);
@@ -4049,13 +4050,13 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                     }
                     calendar
                         .events
-                        .retain(|event| event.account_id != removal.account_id);
+                        .retain(|event| event.account_id != account_id);
                     calendar
                         .sources
-                        .retain(|source| source.account_id != removal.account_id);
+                        .retain(|source| source.account_id != account_id);
                     calendar
                         .accounts
-                        .retain(|account| account.id != removal.account_id);
+                        .retain(|account| account.id != account_id);
                 }
             }
             if let Some(snapshot) = update.accounts.filter(|snapshot| {
@@ -4124,26 +4125,26 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                 app.set_imap_host("".into());
                 app.set_smtp_host("".into());
             }
-            if let Some(removal) = removed {
+            if let Some(removal) = update.account_removal.as_mut().filter(|removal| removal.removed) {
                 let current_page = {
                     let mut state = ui_task_state.borrow_mut();
                     if let Some(metadata) = removal
                         .metadata
-                        .as_ref()
+                        .take()
                         .filter(|_| !state.connected_accounts.is_empty())
                     {
-                        state.mailboxes = metadata.mailboxes.clone();
-                        state.unified_mailboxes = metadata.unified_mailboxes.clone();
+                        state.mailboxes = metadata.mailboxes;
+                        state.unified_mailboxes = metadata.unified_mailboxes;
                         state.inbox_count = metadata.inbox_count;
                     }
                     let current = removal.scope == state.scope && removal.query == state.query;
-                    if current && let Some(page) = removal.page.as_ref() {
-                        let selected = state
-                            .messages
-                            .iter()
-                            .find(|message| Some(message.id) == state.selected_id)
-                            .cloned();
-                        state.messages = page.messages.clone();
+                    let has_page = removal.page.is_some();
+                    if current && let Some(page) = removal.page.take() {
+                        let selected_id = state.selected_id;
+                        let selected = std::mem::take(&mut state.messages)
+                            .into_iter()
+                            .find(|message| Some(message.id) == selected_id);
+                        state.messages = page.messages;
                         if let Some(selected) = selected
                             && let Some(message) = state
                                 .messages
@@ -4155,10 +4156,10 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                             message.attachments = selected.attachments;
                             message.body_pending = selected.body_pending;
                         }
-                        state.labels = page.labels.clone();
+                        state.labels = page.labels;
                         state.next_cursor = page.next_cursor;
                     }
-                    current && removal.page.is_some()
+                    current && has_page
                 };
                 refresh_connected_accounts(&app, &ui_task_state);
                 apply_contact_directory(&app, &removal_contacts);

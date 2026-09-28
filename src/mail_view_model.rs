@@ -32,7 +32,7 @@ pub(super) fn refresh_from_source(
 /// background refresh has no cheap way to verify. Pass an empty slice when the
 /// refresh does not follow a message-moving action.
 fn merge_refreshed_mail_head(
-    current: &[MailMessage],
+    current: Vec<MailMessage>,
     refreshed: Vec<MailMessage>,
     next_cursor: Option<MailCursor>,
     drop_ids: &[i32],
@@ -58,14 +58,38 @@ fn merge_refreshed_mail_head(
         .map(|message| message.id)
         .collect::<HashSet<_>>();
     merged.extend(
-        current[tail_start..]
-            .iter()
+        current
+            .into_iter()
+            .skip(tail_start)
             .filter(|message| known.insert(message.id))
-            .filter(|message| !drop_ids.contains(&message.id))
-            .cloned(),
+            .filter(|message| !drop_ids.contains(&message.id)),
     );
     let retained_tail = merged.len() > refreshed_len;
     (merged, retained_tail)
+}
+
+fn carry_selected_detail(
+    old_messages: &mut [MailMessage],
+    refreshed: &mut [MailMessage],
+    selected_id: Option<i32>,
+) {
+    let Some(selected_id) = selected_id else {
+        return;
+    };
+    let Some(selected_detail) = old_messages
+        .iter_mut()
+        .find(|message| message.id == selected_id && !message.body_pending)
+    else {
+        return;
+    };
+    let Some(summary) = refreshed.iter_mut().find(|message| message.id == selected_id) else {
+        return;
+    };
+    summary.html = selected_detail.html.take();
+    summary.text = selected_detail.text.take();
+    summary.to = std::mem::take(&mut selected_detail.to);
+    summary.attachments = std::mem::take(&mut selected_detail.attachments);
+    summary.body_pending = false;
 }
 
 pub(super) fn apply_background_mail_page(
@@ -88,24 +112,8 @@ pub(super) fn apply_background_mail_page(
     let selection_removed = {
         let mut state = state.borrow_mut();
         state.labels = labels;
-        let selected_detail = state.selected_id.and_then(|selected_id| {
-            state
-                .messages
-                .iter()
-                .find(|message| message.id == selected_id && !message.body_pending)
-                .cloned()
-        });
-        if let Some(selected_detail) = selected_detail
-            && let Some(summary) = messages
-                .iter_mut()
-                .find(|message| message.id == selected_detail.id)
-        {
-            summary.html = selected_detail.html;
-            summary.text = selected_detail.text;
-            summary.to = selected_detail.to;
-            summary.attachments = selected_detail.attachments;
-            summary.body_pending = false;
-        }
+        let mut old_messages = std::mem::take(&mut state.messages);
+        carry_selected_detail(&mut old_messages, &mut messages, state.selected_id);
 
         let old_counts = state
             .mailboxes
@@ -121,7 +129,7 @@ pub(super) fn apply_background_mail_page(
 
         let old_next_cursor = state.next_cursor;
         let (merged, retained_tail) =
-            merge_refreshed_mail_head(&state.messages, messages, next_cursor, acted_on_ids);
+            merge_refreshed_mail_head(old_messages, messages, next_cursor, acted_on_ids);
         state.messages = merged;
         state.mailboxes = mailboxes;
         state.next_cursor = if retained_tail {
@@ -219,20 +227,27 @@ pub(super) fn select_message(
     render_current(app, state, runtime)
 }
 
-fn adjacent_message_ids(messages: &[MailMessage], selected_id: Option<i32>) -> (i32, i32) {
+fn adjacent_message_ids<M: std::borrow::Borrow<MailMessage>>(
+    messages: &[M],
+    selected_id: Option<i32>,
+) -> (i32, i32) {
     let Some(selected_index) =
-        selected_id.and_then(|id| messages.iter().position(|message| message.id == id))
+        selected_id.and_then(|id| {
+            messages
+                .iter()
+                .position(|message| std::borrow::Borrow::borrow(message).id == id)
+        })
     else {
         return (-1, -1);
     };
     let previous_id = selected_index
         .checked_sub(1)
         .and_then(|index| messages.get(index))
-        .map(|message| message.id)
+        .map(|message| std::borrow::Borrow::borrow(message).id)
         .unwrap_or(-1);
     let next_id = messages
         .get(selected_index + 1)
-        .map(|message| message.id)
+        .map(|message| std::borrow::Borrow::borrow(message).id)
         .unwrap_or(-1);
     (previous_id, next_id)
 }
@@ -267,12 +282,12 @@ pub(super) fn render_current(
         (Rc::clone(&state.email_renderer), state.use_wgpu)
     };
     let (
-        messages,
-        page,
         scope,
         query,
         selected_id,
-        preview_closed,
+        visible_ids,
+        visible_count,
+        total_count,
         mailboxes,
         unified_mailboxes,
         next_cursor,
@@ -284,18 +299,33 @@ pub(super) fn render_current(
         account_presentation,
     ) = {
         let state = state.borrow();
+        let messages = filtered_messages(
+            &state.messages,
+            &state.scope,
+            if state.using_core { "" } else { &state.query },
+            &state.search_filter,
+        );
+        let visible_count = if state.using_core {
+            messages.len()
+        } else {
+            paged_visible_count(state.page, messages.len())
+        };
+        let visible = &messages[..visible_count];
+        let selected_id = if state.preview_closed {
+            None
+        } else {
+            state
+                .selected_id
+                .filter(|id| visible.iter().any(|email| email.id == *id))
+                .or_else(|| visible.first().map(|email| email.id))
+        };
         (
-            filtered_messages(
-                &state.messages,
-                &state.scope,
-                if state.using_core { "" } else { &state.query },
-                &state.search_filter,
-            ),
-            state.page,
             state.scope.clone(),
             state.query.clone(),
-            state.selected_id,
-            state.preview_closed,
+            selected_id,
+            visible.iter().map(|email| email.id).collect::<HashSet<_>>(),
+            visible_count,
+            messages.len(),
             state.mailboxes.clone(),
             state.unified_mailboxes.clone(),
             state.next_cursor,
@@ -308,30 +338,12 @@ pub(super) fn render_current(
         )
     };
 
-    let visible_count = if using_core {
-        messages.len()
-    } else {
-        paged_visible_count(page, messages.len())
-    };
-    let visible = &messages[..visible_count];
-    let selected_id = if preview_closed {
-        None
-    } else {
-        selected_id
-            .filter(|id| visible.iter().any(|email| email.id == *id))
-            .or_else(|| visible.first().map(|email| email.id))
-    };
-    let selected_email =
-        selected_id.and_then(|id| visible.iter().find(|email| email.id == id).cloned());
-
     let (selection_changed, allow_remote_images, checked_ids) = {
         let mut state = state.borrow_mut();
         let selection_changed = state.rendered_id != selected_id;
         state.selected_id = selected_id;
         state.rendered_id = selected_id;
-        state
-            .checked_ids
-            .retain(|id| visible.iter().any(|message| message.id == *id));
+        state.checked_ids.retain(|id| visible_ids.contains(id));
         let allow_remote_images = state.remote_images_enabled
             || selected_id.is_some_and(|id| state.remote_images_override_id == Some(id));
         (
@@ -353,26 +365,55 @@ pub(super) fn render_current(
         app.set_rendering_info_open(false);
     }
 
-    let projected_rows = make_rows(
-        visible,
-        selected_id,
-        &checked_ids,
-        &favicon_icons,
-        &labels,
-        &account_presentation,
-    );
-    let (email_rows, mail_list_entries, list_projection) = {
+    let (
+        selected_email,
+        projected_rows,
+        list_projection,
+        previous_email_id,
+        next_email_id,
+        visible_domains,
+        email_rows,
+        mail_list_entries,
+    ) = {
         let state = state.borrow();
+        let messages = filtered_messages(
+            &state.messages,
+            &state.scope,
+            if state.using_core { "" } else { &state.query },
+            &state.search_filter,
+        );
+        let visible = &messages[..visible_count];
+        let selected_email = selected_id
+            .and_then(|id| visible.iter().find(|email| email.id == id))
+            .map(|email| (**email).clone());
+        let projected_rows = make_rows(
+            visible,
+            selected_id,
+            &checked_ids,
+            &favicon_icons,
+            &labels,
+            &account_presentation,
+        );
+        let list_projection = project_mail_list(
+            visible,
+            &projected_rows,
+            &state.mail_groups,
+            query.trim().is_empty() && app.get_group_mail_by_date(),
+            Local::now(),
+        );
+        let (previous_email_id, next_email_id) = adjacent_message_ids(visible, selected_id);
         (
+            selected_email,
+            projected_rows,
+            list_projection,
+            previous_email_id,
+            next_email_id,
+            visible
+                .iter()
+                .map(|message| message.domain.clone())
+                .collect::<Vec<_>>(),
             Rc::clone(&state.email_rows),
             Rc::clone(&state.mail_list_entries),
-            project_mail_list(
-                visible,
-                &projected_rows,
-                &state.mail_groups,
-                query.trim().is_empty() && app.get_group_mail_by_date(),
-                Local::now(),
-            ),
         )
     };
     reconcile_model_rows_by(
@@ -400,7 +441,7 @@ pub(super) fn render_current(
     app.set_can_load_more(if using_core {
         next_cursor.is_some()
     } else {
-        visible_count < messages.len()
+        visible_count < total_count
     });
     app.set_has_selected(selected_email.is_some());
     app.set_selected_account_uses_labels(selected_email.as_ref().is_some_and(|email| {
@@ -411,16 +452,17 @@ pub(super) fn render_current(
             .any(|account| account.id == email.account_id && account.provider == Provider::Gmail)
     }));
     apply_label_rows(app, &labels, selected_email.as_ref());
-    let (previous_email_id, next_email_id) = adjacent_message_ids(visible, selected_id);
     app.set_previous_email_id(previous_email_id);
     app.set_next_email_id(next_email_id);
     state.borrow().queue_warm_start_update();
-    schedule_favicon_fetches(app, state, runtime, visible);
+    schedule_favicon_fetches(app, state, runtime, &visible_domains);
 
     if let Some(email) = selected_email {
+        let email_id = email.id;
+        let thread_subject = email.subject.clone();
         let (mut display_email, conversation_ready, conversation_selected_index) = {
             let state = state.borrow();
-            let conversation_ready = state.conversation_owner_id == Some(email.id)
+            let conversation_ready = state.conversation_owner_id == Some(email_id)
                 && !state.conversation_messages.is_empty();
             let display_email = conversation_ready
                 .then(|| {
@@ -430,7 +472,7 @@ pub(super) fn render_current(
                         .cloned()
                 })
                 .flatten()
-                .unwrap_or_else(|| email.clone());
+                .unwrap_or(email);
             if conversation_ready {
                 reconcile_model_rows_by(
                     &state.conversation_rows,
@@ -450,7 +492,7 @@ pub(super) fn render_current(
             )
         };
         if conversation_ready {
-            display_email.subject.clone_from(&email.subject);
+            display_email.subject = thread_subject;
         }
         app.set_selected_thread_index(if conversation_ready {
             i32::try_from(conversation_selected_index).unwrap_or(i32::MAX)
@@ -464,7 +506,7 @@ pub(super) fn render_current(
                 .invoke_ensure_body(if conversation_ready {
                     display_email.id
                 } else {
-                    email.id
+                    email_id
                 });
         }
         apply_selected_favicon(app, favicon_icons.get(&display_email.domain));
@@ -718,12 +760,12 @@ pub(super) fn release_unselected_bodies(messages: &mut [MailMessage], selected: 
     }
 }
 
-pub(super) fn filtered_messages(
-    messages: &[MailMessage],
+pub(super) fn filtered_messages<'a>(
+    messages: &'a [MailMessage],
     scope: &str,
     query: &str,
     search_filter: &str,
-) -> Vec<MailMessage> {
+) -> Vec<&'a MailMessage> {
     let query = query.trim().to_lowercase();
     messages
         .iter()
@@ -749,7 +791,6 @@ pub(super) fn filtered_messages(
             .into_iter()
             .any(|field| field.to_lowercase().contains(&query))
         })
-        .cloned()
         .collect()
 }
 
@@ -817,8 +858,8 @@ pub(super) fn same_email_row(a: &EmailRow, b: &EmailRow) -> bool {
         && a.labels.iter().eq(b.labels.iter())
 }
 
-pub(super) fn make_rows(
-    messages: &[MailMessage],
+pub(super) fn make_rows<M: std::borrow::Borrow<MailMessage>>(
+    messages: &[M],
     selected_id: Option<i32>,
     checked_ids: &HashSet<i32>,
     favicon_icons: &HashMap<String, FaviconImages>,
@@ -829,6 +870,7 @@ pub(super) fn make_rows(
     messages
         .iter()
         .map(|email| {
+            let email = std::borrow::Borrow::borrow(email);
             let favicons = favicon_icons.get(&email.domain);
             let favicon = favicons.map(|icons| slint_image(&icons.regular));
             let favicon_small = favicons.map(|icons| slint_image(&icons.small));
@@ -965,78 +1007,83 @@ pub(super) fn refresh_rows_only(
     runtime: &tokio::runtime::Runtime,
 ) {
     let (
-        messages,
-        page,
-        using_core,
         selected_id,
-        preview_closed,
+        checked_ids,
+        selected_email,
+        projected_rows,
+        list_projection,
+        visible_domains,
+        email_rows,
+        mail_list_entries,
+        labels,
         favicon_icons,
-        account_presentation,
     ) = {
         let state = state.borrow();
-        (
-            filtered_messages(
-                &state.messages,
-                &state.scope,
-                if state.using_core { "" } else { &state.query },
-                &state.search_filter,
-            ),
-            state.page,
-            state.using_core,
-            state.selected_id,
-            state.preview_closed,
-            state.favicon_icons.clone(),
-            state.account_presentation.clone(),
-        )
-    };
-    let visible_count = if using_core {
-        messages.len()
-    } else {
-        paged_visible_count(page, messages.len())
-    };
-    let visible = &messages[..visible_count];
-    let selected_id = if preview_closed {
-        None
-    } else {
-        selected_id
-            .filter(|id| visible.iter().any(|email| email.id == *id))
-            .or_else(|| visible.first().map(|email| email.id))
-    };
-    let checked_ids = {
-        let mut state = state.borrow_mut();
-        state.selected_id = selected_id;
-        state
+        let messages = filtered_messages(
+            &state.messages,
+            &state.scope,
+            if state.using_core { "" } else { &state.query },
+            &state.search_filter,
+        );
+        let visible_count = if state.using_core {
+            messages.len()
+        } else {
+            paged_visible_count(state.page, messages.len())
+        };
+        let visible = &messages[..visible_count];
+        let selected_id = if state.preview_closed {
+            None
+        } else {
+            state
+                .selected_id
+                .filter(|id| visible.iter().any(|email| email.id == *id))
+                .or_else(|| visible.first().map(|email| email.id))
+        };
+        let visible_ids = visible.iter().map(|message| message.id).collect::<HashSet<_>>();
+        let checked_ids = state
             .checked_ids
-            .retain(|id| visible.iter().any(|message| message.id == *id));
-        state.checked_ids.clone()
-    };
-    let selected_email = selected_id.and_then(|id| visible.iter().find(|email| email.id == id));
-    let (email_rows, mail_list_entries, labels) = {
-        let state = state.borrow();
-        (
-            Rc::clone(&state.email_rows),
-            Rc::clone(&state.mail_list_entries),
-            state.labels.clone(),
-        )
-    };
-    let projected_rows = make_rows(
-        visible,
-        selected_id,
-        &checked_ids,
-        &favicon_icons,
-        &labels,
-        &account_presentation,
-    );
-    let list_projection = {
-        let state = state.borrow();
-        project_mail_list(
+            .intersection(&visible_ids)
+            .copied()
+            .collect::<HashSet<_>>();
+        let selected_email = selected_id
+            .and_then(|id| visible.iter().find(|email| email.id == id))
+            .map(|email| (**email).clone());
+        let projected_rows = make_rows(
+            visible,
+            selected_id,
+            &checked_ids,
+            &state.favicon_icons,
+            &state.labels,
+            &state.account_presentation,
+        );
+        let list_projection = project_mail_list(
             visible,
             &projected_rows,
             &state.mail_groups,
             state.query.trim().is_empty() && app.get_group_mail_by_date(),
             Local::now(),
+        );
+        (
+            selected_id,
+            checked_ids,
+            selected_email,
+            projected_rows,
+            list_projection,
+            visible
+                .iter()
+                .map(|message| message.domain.clone())
+                .collect::<Vec<_>>(),
+            Rc::clone(&state.email_rows),
+            Rc::clone(&state.mail_list_entries),
+            state.labels.clone(),
+            state.favicon_icons.clone(),
         )
     };
+    {
+        let mut state = state.borrow_mut();
+        state.selected_id = selected_id;
+        state.checked_ids.clone_from(&checked_ids);
+    }
     reconcile_model_rows_by(
         &email_rows,
         projected_rows,
@@ -1050,16 +1097,16 @@ pub(super) fn refresh_rows_only(
         same_mail_list_entry,
     );
     app.set_mail_selection_count(checked_ids.len() as i32);
-    app.set_selected_account_uses_labels(selected_email.is_some_and(|email| {
+    app.set_selected_account_uses_labels(selected_email.as_ref().is_some_and(|email| {
         state
             .borrow()
             .connected_accounts
             .iter()
             .any(|account| account.id == email.account_id && account.provider == Provider::Gmail)
     }));
-    apply_label_rows(app, &labels, selected_email);
+    apply_label_rows(app, &labels, selected_email.as_ref());
     refresh_sidebar(state);
-    let selected_domain = selected_email.map(|email| {
+    let selected_domain = selected_email.as_ref().map(|email| {
         let state = state.borrow();
         if state.conversation_owner_id == selected_id {
             state
@@ -1080,66 +1127,60 @@ pub(super) fn refresh_rows_only(
         (state.conversation_owner_id == selected_id && !state.conversation_messages.is_empty())
             .then(|| {
                 (
-                    state.conversation_messages.clone(),
-                    state.conversation_selected_index,
+                    make_thread_rows(
+                        &state.conversation_messages,
+                        state.conversation_selected_index,
+                        &favicon_icons,
+                    ),
                     Rc::clone(&state.conversation_rows),
                 )
             })
     };
-    if let Some((messages, selected_index, rows)) = conversation_projection {
+    if let Some((thread_rows, rows)) = conversation_projection {
         reconcile_model_rows_by(
             &rows,
-            make_thread_rows(&messages, selected_index, &favicon_icons),
+            thread_rows,
             |row| row.index,
             PartialEq::eq,
         );
     }
-    schedule_favicon_fetches(app, state, runtime, visible);
+    schedule_favicon_fetches(app, state, runtime, &visible_domains);
 }
 
 pub(super) fn refresh_list_metadata(app: &AppWindow, state: &Rc<RefCell<InboxState>>) {
     let (
-        messages,
-        page,
-        using_core,
+        can_load_more,
         query,
         scope,
         mailboxes,
         unified_mailboxes,
-        next_cursor,
         search_filter,
         inbox_count,
         labels,
     ) = {
         let state = state.borrow();
-        (
-            filtered_messages(
+        let can_load_more = if state.using_core {
+            state.next_cursor.is_some()
+        } else {
+            let total = filtered_messages(
                 &state.messages,
                 &state.scope,
-                if state.using_core { "" } else { &state.query },
+                &state.query,
                 &state.search_filter,
-            ),
-            state.page,
-            state.using_core,
+            )
+            .len();
+            paged_visible_count(state.page, total) < total
+        };
+        (
+            can_load_more,
             state.query.clone(),
             state.scope.clone(),
             state.mailboxes.clone(),
             state.unified_mailboxes.clone(),
-            state.next_cursor,
             state.search_filter.clone(),
             state.inbox_count,
             state.labels.clone(),
         )
-    };
-    let visible_count = if using_core {
-        messages.len()
-    } else {
-        paged_visible_count(page, messages.len())
-    };
-    let can_load_more = if using_core {
-        next_cursor.is_some()
-    } else {
-        visible_count < messages.len()
     };
 
     refresh_sidebar(state);
@@ -1167,7 +1208,7 @@ pub(super) fn schedule_favicon_fetches(
     app: &AppWindow,
     state: &Rc<RefCell<InboxState>>,
     runtime: &tokio::runtime::Runtime,
-    visible: &[MailMessage],
+    visible_domains: &[String],
 ) {
     let pixel_sides = (
         physical_pixel_side(SENDER_AVATAR_SMALL_SIDE, app.window().scale_factor()),
@@ -1210,9 +1251,9 @@ pub(super) fn schedule_favicon_fetches(
     {
         let mut state = state.borrow_mut();
         let mut domains = HashSet::new();
-        for domain in visible
+        for domain in visible_domains
             .iter()
-            .map(|email| email.domain.as_str())
+            .map(String::as_str)
             .chain(conversation_domains.iter().map(String::as_str))
             .filter(|domain| !domain.is_empty())
         {
@@ -1633,14 +1674,16 @@ mod tests {
 
     #[test]
     fn head_refresh_merges_into_the_retained_tail() {
-        let current = (1..=50).map(message).collect::<Vec<_>>();
+        let mut current = (1..=50).map(message).collect::<Vec<_>>();
+        current[49].html = Some("retained body".repeat(1_000));
+        let retained_body_ptr = current[49].html.as_ref().unwrap().as_ptr();
         let refreshed = [101, 102]
             .into_iter()
             .chain(1..=23)
             .map(message)
             .collect::<Vec<_>>();
         let (merged, retained_tail) = merge_refreshed_mail_head(
-            &current,
+            current,
             refreshed,
             Some(MailCursor::Thread(ThreadCursor {
                 last_message_at: 0,
@@ -1663,13 +1706,51 @@ mod tests {
         assert_eq!(merged[24].id, 23);
         assert_eq!(merged[25].id, 24);
         assert_eq!(merged.last().map(|row| row.id), Some(50));
+        assert_eq!(
+            merged.last().unwrap().html.as_ref().unwrap().as_ptr(),
+            retained_body_ptr,
+            "retained tail should move its body buffer without a deep copy"
+        );
+    }
+
+    #[test]
+    fn filtered_rows_borrow_loaded_message_bodies() {
+        let mut messages = vec![message(1), message(2)];
+        messages[0].folder = "Inbox".into();
+        messages[1].folder = "Archive".into();
+        messages[0].html = Some("large selected body".repeat(1_000));
+        let filtered = filtered_messages(&messages, "Unified Inbox", "", "All mail");
+        assert_eq!(filtered.len(), 1);
+        assert!(std::ptr::eq(filtered[0], &messages[0]));
+        assert_eq!(filtered[0].html.as_ref().unwrap().as_ptr(), messages[0].html.as_ref().unwrap().as_ptr());
+    }
+
+    #[test]
+    fn selected_detail_moves_into_refreshed_head() {
+        let mut old = vec![message(1), message(2)];
+        old[0].body_pending = false;
+        old[0].html = Some("selected HTML".repeat(1_000));
+        old[0].text = Some("selected text".repeat(1_000));
+        old[0].to = "recipient@example.org".into();
+        let html_ptr = old[0].html.as_ref().unwrap().as_ptr();
+        let text_ptr = old[0].text.as_ref().unwrap().as_ptr();
+        let mut fresh = vec![message(1), message(2)];
+
+        carry_selected_detail(&mut old, &mut fresh, Some(1));
+
+        assert_eq!(fresh[0].html.as_ref().unwrap().as_ptr(), html_ptr);
+        assert_eq!(fresh[0].text.as_ref().unwrap().as_ptr(), text_ptr);
+        assert_eq!(fresh[0].to, "recipient@example.org");
+        assert!(!fresh[0].body_pending);
+        assert!(old[0].html.is_none() && old[0].text.is_none());
+        assert!(fresh[1].html.is_none());
     }
 
     #[test]
     fn exhausted_head_refresh_replaces_the_old_tail() {
         let current = (1..=50).map(message).collect::<Vec<_>>();
         let refreshed = (1..=12).map(message).collect::<Vec<_>>();
-        let (merged, retained_tail) = merge_refreshed_mail_head(&current, refreshed, None, &[]);
+        let (merged, retained_tail) = merge_refreshed_mail_head(current, refreshed, None, &[]);
         assert!(!retained_tail);
         assert_eq!(merged.len(), 12);
     }
@@ -1681,7 +1762,7 @@ mod tests {
         let current = (1..=50).map(message).collect::<Vec<_>>();
         let refreshed = (1..=23).map(message).collect::<Vec<_>>();
         let (merged, retained_tail) = merge_refreshed_mail_head(
-            &current,
+            current,
             refreshed,
             Some(MailCursor::Thread(ThreadCursor {
                 last_message_at: 0,
@@ -1706,7 +1787,7 @@ mod tests {
         let current = (1..=50).map(message).collect::<Vec<_>>();
         let refreshed = (1..=23).map(message).collect::<Vec<_>>();
         let (merged, _) = merge_refreshed_mail_head(
-            &current,
+            current,
             refreshed,
             Some(MailCursor::Thread(ThreadCursor {
                 last_message_at: 0,
