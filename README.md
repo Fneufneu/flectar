@@ -3,6 +3,9 @@
   <h1 align="center">
     Flectar Mail
   </h1>
+  <p>
+    <strong>English</strong> · <a href="README.zh_Hans.md">简体中文</a>
+  </p>
   <div align="center">
     <h3>Email, made fast again</h3>
     <p>Built from the ground up for speed. Flectar Mail delivers native performance, instant startup, and as little as 20 MB of RAM.</p>
