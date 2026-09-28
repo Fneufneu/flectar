@@ -523,8 +523,8 @@ export component AppWindow inherits Window {
     callback remove_compose_attachment(int);
     callback format_compose(string, string, int, int);
     callback link_compose(string, string, int, int);
-    callback edit_compose_body(string, int, int);
-    callback update_compose_selection(int, int);
+    callback edit_compose_body(string, int, int, string);
+    callback update_compose_selection(string, int, int);
     callback compose_history(string);
     callback compose_editor_pointer_event(float, float, string, bool, bool, bool, bool);
     callback compose_editor_key_event(string, bool, bool, bool, bool) -> bool;
@@ -1734,8 +1734,8 @@ export component AppWindow inherits Window {
             link_compose(url, body, anchor, cursor) => {
                 root.link_compose(url, body, anchor, cursor);
             }
-            edit_compose_body(body, anchor, cursor) => { root.edit_compose_body(body, anchor, cursor); }
-            update_compose_selection(anchor, cursor) => { root.update_compose_selection(anchor, cursor); }
+            edit_compose_body(body, anchor, cursor, key-text) => { root.edit_compose_body(body, anchor, cursor, key-text); }
+            update_compose_selection(body, anchor, cursor) => { root.update_compose_selection(body, anchor, cursor); }
             compose_history(direction) => { root.compose_history(direction); }
             compose_editor_pointer_event(x, y, kind, control, shift, alt, meta) => {
                 root.compose_editor_pointer_event(x, y, kind, control, shift, alt, meta);

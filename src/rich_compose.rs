@@ -1,4 +1,9 @@
-use std::ops::Range;
+use std::{
+    borrow::Cow,
+    collections::{HashSet, VecDeque},
+    ops::Range,
+    sync::Arc,
+};
 
 pub(crate) const BOLD: u8 = 1 << 0;
 pub(crate) const ITALIC: u8 = 1 << 1;
@@ -6,11 +11,14 @@ pub(crate) const UNDERLINE: u8 = 1 << 2;
 pub(crate) const STRIKE: u8 = 1 << 3;
 pub(crate) const CODE: u8 = 1 << 4;
 const MAX_HISTORY: usize = 128;
+// The most recent edit remains undoable even when one transaction exceeds this limit.
+const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_TYPING_GROUP_BYTES: usize = 64;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CharacterStyle {
     pub(crate) marks: u8,
-    pub(crate) link: Option<String>,
+    pub(crate) link: Option<Arc<str>>,
     link_is_auto: bool,
 }
 
@@ -23,10 +31,51 @@ pub(crate) struct ComposeStyleRun {
 #[derive(Clone, Debug)]
 struct Snapshot {
     text: String,
-    styles: Vec<CharacterStyle>,
+    styles: Vec<ComposeStyleRun>,
     typing_style: CharacterStyle,
     typing_override: Option<usize>,
     selection: (i32, i32),
+}
+
+#[derive(Clone, Debug)]
+struct EditFragment {
+    text: Arc<str>,
+    span_len: usize,
+    styles: Vec<ComposeStyleRun>,
+}
+
+struct StyleEditBefore {
+    fragment: EditFragment,
+    typing_style: CharacterStyle,
+    typing_override: Option<usize>,
+    selection: (i32, i32),
+}
+
+#[derive(Clone, Debug)]
+struct EditTransaction {
+    start: usize,
+    before: EditFragment,
+    after: EditFragment,
+    before_typing_style: CharacterStyle,
+    after_typing_style: CharacterStyle,
+    before_typing_override: Option<usize>,
+    after_typing_override: Option<usize>,
+    before_selection: (i32, i32),
+    after_selection: (i32, i32),
+    retained_bytes: usize,
+}
+
+/// Estimated bytes owned by the document and its history. This excludes
+/// allocator overhead, temporary edit buffers, renderer state, and process RAM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct ComposeMemoryUsage {
+    pub(crate) text_capacity: usize,
+    pub(crate) style_run_bytes: usize,
+    pub(crate) link_bytes: usize,
+    pub(crate) undo_bytes: usize,
+    pub(crate) redo_bytes: usize,
+    pub(crate) total_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,19 +95,20 @@ pub struct ComposeSelection {
 
 /// Rich formatting state for the native composer.
 ///
-/// The editable string never contains markup. A parallel style cell is retained
-/// for each Unicode scalar and exposed as byte-ranged runs to the cosmic-text
-/// layout surface. Slint's hidden TextInput is only the platform IME/clipboard
+/// The editable string never contains markup. Styles are retained as merged
+/// UTF-8 byte ranges and exposed to the cosmic-text layout surface. Slint's
+/// hidden TextInput is only the platform IME/clipboard
 /// bridge; it is not used to position visible text, selection, or the caret.
 #[derive(Default)]
 pub struct RichComposeDocument {
     text: String,
-    styles: Vec<CharacterStyle>,
+    styles: Vec<ComposeStyleRun>,
     typing_style: CharacterStyle,
     typing_override: Option<usize>,
     selection: (i32, i32),
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
+    undo: VecDeque<EditTransaction>,
+    redo: VecDeque<EditTransaction>,
+    typing_group_active: bool,
     revision: u64,
 }
 
@@ -98,67 +148,135 @@ impl RichComposeDocument {
     }
 
     pub(crate) fn style_runs(&self) -> Vec<ComposeStyleRun> {
-        let mut runs = Vec::new();
-        let mut start = 0usize;
-        let mut active: Option<CharacterStyle> = None;
-
-        for ((byte, _), style) in self.text.char_indices().zip(self.styles.iter()) {
-            if active.as_ref() != Some(style) {
-                if let Some(previous) = active.replace(style.clone()) {
-                    runs.push(ComposeStyleRun {
-                        range: start..byte,
-                        style: previous,
-                    });
-                }
-                start = byte;
-            }
-        }
-        if let Some(style) = active {
-            runs.push(ComposeStyleRun {
-                range: start..self.text.len(),
-                style,
-            });
-        }
-        runs
+        self.styles.clone()
     }
 
     pub(crate) fn typing_style(&self) -> &CharacterStyle {
         &self.typing_style
     }
 
-    pub fn synchronize(&mut self, new_text: &str, anchor: i32, cursor: i32) -> ComposeSelection {
-        let continuation = continue_list_edit(&self.text, new_text);
-        let (effective_text, anchor, cursor) = continuation
-            .map(|(text, position)| (text, position, position))
-            .unwrap_or_else(|| (new_text.to_owned(), anchor, cursor));
+    #[allow(dead_code)]
+    pub(crate) fn memory_usage(&self) -> ComposeMemoryUsage {
+        let mut usage = ComposeMemoryUsage {
+            text_capacity: self.text.capacity(),
+            style_run_bytes: self.styles.capacity() * std::mem::size_of::<ComposeStyleRun>(),
+            undo_bytes: self.undo.capacity() * std::mem::size_of::<EditTransaction>(),
+            redo_bytes: self.redo.capacity() * std::mem::size_of::<EditTransaction>(),
+            ..Default::default()
+        };
+        let mut seen_text = HashSet::new();
+        let mut seen_links = HashSet::new();
+        count_style_links(&self.typing_style, &mut seen_links, &mut usage.link_bytes);
+        for run in &self.styles {
+            count_style_links(&run.style, &mut seen_links, &mut usage.link_bytes);
+        }
+        for (transactions, bytes) in [
+            (&self.undo, &mut usage.undo_bytes),
+            (&self.redo, &mut usage.redo_bytes),
+        ] {
+            for transaction in transactions {
+                for style in [
+                    &transaction.before_typing_style,
+                    &transaction.after_typing_style,
+                ] {
+                    count_style_links(style, &mut seen_links, &mut usage.link_bytes);
+                }
+                for fragment in [&transaction.before, &transaction.after] {
+                    *bytes += fragment.styles.capacity() * std::mem::size_of::<ComposeStyleRun>();
+                    if seen_text.insert(Arc::as_ptr(&fragment.text) as *const u8 as usize) {
+                        *bytes += fragment_text_bytes(&fragment.text);
+                    }
+                    for run in &fragment.styles {
+                        count_style_links(&run.style, &mut seen_links, &mut usage.link_bytes);
+                    }
+                }
+            }
+        }
+        usage.total_bytes = std::mem::size_of::<Self>()
+            + usage.text_capacity
+            + usage.style_run_bytes
+            + usage.link_bytes
+            + usage.undo_bytes
+            + usage.redo_bytes;
+        usage
+    }
 
-        if effective_text != self.text {
-            self.push_undo();
-            self.redo.clear();
-            self.replace_text_preserving_styles(&effective_text);
+    pub fn synchronize(&mut self, new_text: &str, anchor: i32, cursor: i32) -> ComposeSelection {
+        self.synchronize_key_edit(new_text, anchor, cursor, "")
+    }
+
+    /// `key_text` must come from the immediately preceding ordinary key event.
+    /// Callers pass an empty string for paste, IME, and unclassified edits.
+    pub fn synchronize_key_edit(
+        &mut self,
+        new_text: &str,
+        anchor: i32,
+        cursor: i32,
+        key_text: &str,
+    ) -> ComposeSelection {
+        let continuation = continue_list_edit(&self.text, new_text);
+        let (effective_text, anchor, cursor) = match continuation {
+            Some((text, position)) => (Cow::Owned(text), position, position),
+            None => (Cow::Borrowed(new_text), anchor, cursor),
+        };
+
+        if effective_text.as_ref() != self.text {
+            let (start, old_end, new_end) = text_change_ranges(&self.text, &effective_text);
+            let inserted_len = new_end - start;
+            let inserted = ComposeStyleRun {
+                range: 0..inserted_len,
+                style: if inserted_len > 0 {
+                    self.typing_style.clone()
+                } else {
+                    CharacterStyle::default()
+                },
+            };
+            let styles = replaced_style_runs(
+                &self.styles,
+                start,
+                old_end,
+                std::slice::from_ref(&inserted),
+            );
+            let before = self.take_snapshot();
+            self.styles = styles;
+            self.text = effective_text.into_owned();
             self.auto_link_urls();
             self.bump_revision();
+            let selection = self.update_selection_internal(anchor, cursor, false);
+            self.commit_edit_with_key(before, key_text);
+            return selection;
         }
         self.update_selection(anchor, cursor)
     }
 
     pub fn update_selection(&mut self, anchor: i32, cursor: i32) -> ComposeSelection {
+        self.update_selection_internal(anchor, cursor, true)
+    }
+
+    fn update_selection_internal(
+        &mut self,
+        anchor: i32,
+        cursor: i32,
+        break_typing_group: bool,
+    ) -> ComposeSelection {
         let anchor = valid_offset(&self.text, anchor);
         let cursor = valid_offset(&self.text, cursor);
+        if break_typing_group && self.selection != (to_i32(anchor), to_i32(cursor)) {
+            self.typing_group_active = false;
+        }
         self.selection = (to_i32(anchor), to_i32(cursor));
 
         if anchor == cursor && self.typing_override != Some(cursor) {
-            let char_index = byte_to_char(&self.text, cursor);
-            self.typing_style = if char_index > 0
-                && self
-                    .text
-                    .chars()
-                    .nth(char_index - 1)
-                    .is_some_and(|character| character != '\n')
+            self.typing_style = if self.text[..cursor]
+                .char_indices()
+                .next_back()
+                .is_some_and(|(_, character)| character != '\n')
             {
-                self.styles.get(char_index - 1).cloned().unwrap_or_default()
+                self.style_at(cursor.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or_default()
             } else {
-                self.styles.get(char_index).cloned().unwrap_or_default()
+                self.style_at(cursor).cloned().unwrap_or_default()
             };
             self.typing_override = None;
         } else if anchor != cursor {
@@ -179,21 +297,26 @@ impl RichComposeDocument {
             return self.update_selection(to_i32(start), to_i32(end));
         }
 
-        self.push_undo();
-        self.redo.clear();
-        self.typing_override = None;
-        let start_character = byte_to_char(&self.text, start);
-        let end_character = byte_to_char(&self.text, end);
         let style = self.typing_style.clone();
-        self.text.replace_range(start..end, value);
-        self.styles.splice(
-            start_character..end_character,
-            std::iter::repeat_n(style, value.chars().count()),
-        );
+        let inserted = ComposeStyleRun {
+            range: 0..value.len(),
+            style,
+        };
+        let styles = replaced_style_runs(&self.styles, start, end, std::slice::from_ref(&inserted));
+        let mut text = String::with_capacity(self.text.len() - (end - start) + value.len());
+        text.push_str(&self.text[..start]);
+        text.push_str(value);
+        text.push_str(&self.text[end..]);
+        let before = self.take_snapshot();
+        self.typing_override = None;
+        self.styles = styles;
+        self.text = text;
         self.auto_link_urls();
         self.bump_revision();
         let caret = start.saturating_add(value.len());
-        self.update_selection(to_i32(caret), to_i32(caret))
+        let selection = self.update_selection(to_i32(caret), to_i32(caret));
+        self.commit_edit(before);
+        selection
     }
 
     pub fn format(
@@ -203,6 +326,7 @@ impl RichComposeDocument {
         anchor: i32,
         cursor: i32,
     ) -> ComposeSelection {
+        self.typing_group_active = false;
         if source != self.text {
             self.synchronize(source, anchor, cursor);
         } else {
@@ -233,17 +357,23 @@ impl RichComposeDocument {
     }
 
     pub fn history(&mut self, direction: &str) -> Option<ComposeSelection> {
-        let snapshot = if direction == "redo" {
-            let snapshot = self.redo.pop()?;
-            self.undo.push(self.snapshot());
-            snapshot
+        self.typing_group_active = false;
+        if direction == "redo" {
+            let mut transaction = self.redo.pop_back()?;
+            transaction.before_typing_style = self.typing_style.clone();
+            transaction.before_typing_override = self.typing_override;
+            transaction.before_selection = self.selection;
+            self.apply_transaction(&transaction, true);
+            self.undo.push_back(transaction);
         } else {
-            let snapshot = self.undo.pop()?;
-            self.redo.push(self.snapshot());
-            snapshot
-        };
-
-        self.restore(snapshot);
+            let mut transaction = self.undo.pop_back()?;
+            transaction.after_typing_style = self.typing_style.clone();
+            transaction.after_typing_override = self.typing_override;
+            transaction.after_selection = self.selection;
+            self.apply_transaction(&transaction, false);
+            self.redo.push_back(transaction);
+        }
+        self.trim_history();
         Some(ComposeSelection {
             start: self.selection.0,
             end: self.selection.1,
@@ -257,18 +387,16 @@ impl RichComposeDocument {
         let marks = if start == end {
             self.typing_style.marks
         } else {
-            let start = byte_to_char(&self.text, start);
-            let end = byte_to_char(&self.text, end);
-            let mut relevant = self.styles[start..end]
+            let mut relevant = self
+                .styles
                 .iter()
-                .zip(
-                    self.text
+                .filter(|run| run.range.start < end && run.range.end > start)
+                .filter(|run| {
+                    self.text[run.range.start.max(start)..run.range.end.min(end)]
                         .chars()
-                        .skip(start)
-                        .take(end.saturating_sub(start)),
-                )
-                .filter(|(_, character)| !character.is_whitespace())
-                .map(|(style, _)| style.marks);
+                        .any(|character| !character.is_whitespace())
+                })
+                .map(|run| run.style.marks);
             relevant
                 .next()
                 .map(|first| relevant.fold(first, |common, value| common & value))
@@ -291,18 +419,16 @@ impl RichComposeDocument {
             return None;
         }
 
-        let start = byte_to_char(&self.text, start);
-        let end = byte_to_char(&self.text, end);
-        let mut links = self.styles[start..end]
+        let mut links = self
+            .styles
             .iter()
-            .zip(
-                self.text
+            .filter(|run| run.range.start < end && run.range.end > start)
+            .filter(|run| {
+                self.text[run.range.start.max(start)..run.range.end.min(end)]
                     .chars()
-                    .skip(start)
-                    .take(end.saturating_sub(start)),
-            )
-            .filter(|(_, character)| !character.is_whitespace())
-            .map(|(style, _)| style.link.as_deref());
+                    .any(|character| !character.is_whitespace())
+            })
+            .map(|run| run.style.link.as_deref());
         let first = links.next().flatten()?;
         links.all(|link| link == Some(first)).then_some(first)
     }
@@ -314,6 +440,7 @@ impl RichComposeDocument {
         anchor: i32,
         cursor: i32,
     ) -> ComposeSelection {
+        self.typing_group_active = false;
         if source != self.text {
             self.synchronize(source, anchor, cursor);
         } else {
@@ -330,18 +457,16 @@ impl RichComposeDocument {
             };
         }
 
-        let normalized = normalize_link(url);
-        let start = byte_to_char(&self.text, start_byte);
-        let end = byte_to_char(&self.text, end_byte);
-        self.push_undo();
-        self.redo.clear();
+        let normalized = normalize_link(url).map(Arc::<str>::from);
+        let before = self.begin_style_edit(start_byte..end_byte);
         self.typing_override = None;
-        for style in &mut self.styles[start..end] {
+        self.edit_styles(start_byte, end_byte, |style| {
             style.link = normalized.clone();
             style.link_is_auto = false;
-        }
+        });
         self.selection = (to_i32(start_byte), to_i32(end_byte));
         self.bump_revision();
+        self.commit_style_edit(start_byte, before);
         ComposeSelection {
             start: to_i32(start_byte),
             end: to_i32(end_byte),
@@ -403,29 +528,27 @@ impl RichComposeDocument {
             return;
         }
 
-        let start = byte_to_char(&self.text, start_byte);
-        let end = byte_to_char(&self.text, end_byte);
-        self.push_undo();
-        self.redo.clear();
+        let before = self.begin_style_edit(start_byte..end_byte);
         self.typing_override = None;
-        let remove = self.styles[start..end]
+        let remove = self
+            .styles
             .iter()
-            .zip(
-                self.text
+            .filter(|run| run.range.start < end_byte && run.range.end > start_byte)
+            .filter(|run| {
+                self.text[run.range.start.max(start_byte)..run.range.end.min(end_byte)]
                     .chars()
-                    .skip(start)
-                    .take(end.saturating_sub(start)),
-            )
-            .filter(|(_, character)| !character.is_whitespace())
-            .all(|(style, _)| style.marks & mark != 0);
-        for style in &mut self.styles[start..end] {
+                    .any(|character| !character.is_whitespace())
+            })
+            .all(|run| run.style.marks & mark != 0);
+        self.edit_styles(start_byte, end_byte, |style| {
             if remove {
                 style.marks &= !mark;
             } else {
                 style.marks |= mark;
             }
-        }
+        });
         self.bump_revision();
+        self.commit_style_edit(start_byte, before);
     }
 
     fn toggle_block(
@@ -456,8 +579,7 @@ impl RichComposeDocument {
             };
         }
         let end_line = end_line.min(lines.len() - 1);
-        self.push_undo();
-        self.redo.clear();
+        let before = self.take_snapshot();
         self.typing_override = None;
 
         let all_target = lines[start_line..=end_line]
@@ -493,97 +615,71 @@ impl RichComposeDocument {
         let start = char_to_byte(&self.text, selection_start_char);
         let end = char_to_byte(&self.text, selection_end_char);
         self.selection = (to_i32(start), to_i32(end));
+        self.commit_edit(before);
         ComposeSelection {
             start: to_i32(start),
             end: to_i32(end),
         }
     }
 
-    fn replace_text_preserving_styles(&mut self, new_text: &str) {
-        let old_chars = self.text.chars().collect::<Vec<_>>();
-        let new_chars = new_text.chars().collect::<Vec<_>>();
-        let mut prefix = 0usize;
-        while prefix < old_chars.len()
-            && prefix < new_chars.len()
-            && old_chars[prefix] == new_chars[prefix]
-        {
-            prefix += 1;
-        }
-        let mut suffix = 0usize;
-        while suffix < old_chars.len().saturating_sub(prefix)
-            && suffix < new_chars.len().saturating_sub(prefix)
-            && old_chars[old_chars.len() - 1 - suffix] == new_chars[new_chars.len() - 1 - suffix]
-        {
-            suffix += 1;
-        }
-
-        let inserted = new_chars.len().saturating_sub(prefix + suffix);
-        let inherited = if inserted > 0 {
-            self.typing_style.clone()
-        } else {
-            CharacterStyle::default()
-        };
-        let mut styles = Vec::with_capacity(new_chars.len());
-        styles.extend(self.styles[..prefix.min(self.styles.len())].iter().cloned());
-        styles.extend(std::iter::repeat_n(inherited, inserted));
-        if suffix > 0 {
-            styles.extend(self.styles[self.styles.len() - suffix..].iter().cloned());
-        }
-        styles.resize(new_chars.len(), CharacterStyle::default());
-        self.text = new_text.to_owned();
-        self.styles = styles;
-    }
-
     fn auto_link_urls(&mut self) {
-        for style in &mut self.styles {
+        for run in &mut self.styles {
+            let style = &mut run.style;
             if style.link_is_auto {
                 style.link = None;
                 style.link_is_auto = false;
             }
         }
+        self.merge_styles();
 
-        let chars = self.text.chars().collect::<Vec<_>>();
-        let mut start = 0usize;
-        while start < chars.len() {
-            while start < chars.len() && chars[start].is_whitespace() {
-                start += 1;
-            }
-            let mut end = start;
-            while end < chars.len() && !chars[end].is_whitespace() {
-                end += 1;
-            }
-            let mut url_end = end;
-            while url_end > start
-                && matches!(
-                    chars[url_end - 1],
-                    '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
-                )
-            {
-                url_end -= 1;
-            }
-            if url_end > start {
-                let candidate = chars[start..url_end].iter().collect::<String>();
-                if candidate.starts_with("https://") || candidate.starts_with("http://") {
-                    for style in &mut self.styles[start..url_end] {
-                        if style.link.is_none() || style.link_is_auto {
-                            style.link = Some(candidate.clone());
-                            style.link_is_auto = true;
+        let mut urls = Vec::new();
+        let mut token_start = None;
+        for (byte, character) in self
+            .text
+            .char_indices()
+            .chain(std::iter::once((self.text.len(), ' ')))
+        {
+            if character.is_whitespace() {
+                if let Some(start) = token_start.take() {
+                    let mut end = byte;
+                    while end > start {
+                        let (relative, last) =
+                            self.text[start..end].char_indices().next_back().unwrap();
+                        if !matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+                            break;
                         }
+                        end = start + relative;
+                    }
+                    if self.text[start..end].starts_with("https://")
+                        || self.text[start..end].starts_with("http://")
+                    {
+                        urls.push((start, end));
                     }
                 }
+            } else if token_start.is_none() {
+                token_start = Some(byte);
             }
-            start = end.max(start + 1);
+        }
+        for (start, end) in urls {
+            let link = Arc::<str>::from(&self.text[start..end]);
+            self.edit_styles(start, end, |style| {
+                if style.link.is_none() || style.link_is_auto {
+                    style.link = Some(link.clone());
+                    style.link_is_auto = true;
+                }
+            });
         }
     }
 
     fn lines(&self) -> Vec<RichLine> {
         let mut lines = vec![RichLine::default()];
-        for (character, style) in self.text.chars().zip(self.styles.iter().cloned()) {
+        for (byte, character) in self.text.char_indices() {
             if character == '\n' {
                 lines.push(RichLine::default());
             } else if let Some(line) = lines.last_mut() {
                 line.chars.push(character);
-                line.styles.push(style);
+                line.styles
+                    .push(self.style_at(byte).cloned().unwrap_or_default());
             }
         }
         lines
@@ -594,44 +690,467 @@ impl RichComposeDocument {
         let mut styles = Vec::new();
         for (index, line) in lines.into_iter().enumerate() {
             if index > 0 {
+                let start = text.len();
                 text.push('\n');
-                styles.push(CharacterStyle::default());
+                push_style_run(&mut styles, start..text.len(), CharacterStyle::default());
             }
-            text.extend(line.chars.iter());
-            styles.extend(line.styles);
+            for (character, style) in line.chars.into_iter().zip(line.styles) {
+                let start = text.len();
+                text.push(character);
+                push_style_run(&mut styles, start..text.len(), style);
+            }
         }
         self.text = text;
         self.styles = styles;
     }
 
-    fn snapshot(&self) -> Snapshot {
+    fn style_at(&self, byte: usize) -> Option<&CharacterStyle> {
+        style_at_runs(&self.styles, byte)
+    }
+
+    fn replace_style_runs(&mut self, start: usize, end: usize, inserted: &[ComposeStyleRun]) {
+        self.styles = replaced_style_runs(&self.styles, start, end, inserted);
+    }
+
+    fn edit_styles(&mut self, start: usize, end: usize, mut edit: impl FnMut(&mut CharacterStyle)) {
+        split_style_run_at(&mut self.styles, start);
+        split_style_run_at(&mut self.styles, end);
+        for run in &mut self.styles {
+            if run.range.start >= start && run.range.end <= end {
+                edit(&mut run.style);
+            }
+        }
+        self.merge_styles();
+    }
+
+    fn merge_styles(&mut self) {
+        let old = std::mem::take(&mut self.styles);
+        for run in old {
+            push_style_run(&mut self.styles, run.range, run.style);
+        }
+    }
+
+    fn take_snapshot(&mut self) -> Snapshot {
         Snapshot {
-            text: self.text.clone(),
-            styles: self.styles.clone(),
+            text: std::mem::take(&mut self.text),
+            styles: std::mem::take(&mut self.styles),
             typing_style: self.typing_style.clone(),
             typing_override: self.typing_override,
             selection: self.selection,
         }
     }
 
-    fn push_undo(&mut self) {
-        if self.undo.len() == MAX_HISTORY {
-            self.undo.remove(0);
+    fn begin_style_edit(&self, range: Range<usize>) -> StyleEditBefore {
+        StyleEditBefore {
+            fragment: EditFragment {
+                text: Arc::from(""),
+                span_len: range.end - range.start,
+                styles: style_fragment(&self.styles, range),
+            },
+            typing_style: self.typing_style.clone(),
+            typing_override: self.typing_override,
+            selection: self.selection,
         }
-        self.undo.push(self.snapshot());
     }
 
-    fn restore(&mut self, snapshot: Snapshot) {
-        self.text = snapshot.text;
-        self.styles = snapshot.styles;
-        self.typing_style = snapshot.typing_style;
-        self.typing_override = snapshot.typing_override;
-        self.selection = snapshot.selection;
+    fn commit_style_edit(&mut self, start: usize, before: StyleEditBefore) {
+        let end = start + before.fragment.span_len;
+        let after = EditFragment {
+            text: before.fragment.text.clone(),
+            span_len: before.fragment.span_len,
+            styles: style_fragment(&self.styles, start..end),
+        };
+        let retained_bytes = transaction_bytes(&before.fragment, &after);
+        self.push_transaction(EditTransaction {
+            start,
+            before: before.fragment,
+            after,
+            before_typing_style: before.typing_style,
+            after_typing_style: self.typing_style.clone(),
+            before_typing_override: before.typing_override,
+            after_typing_override: self.typing_override,
+            before_selection: before.selection,
+            after_selection: self.selection,
+            retained_bytes,
+        });
+    }
+
+    fn commit_edit(&mut self, before: Snapshot) {
+        self.commit_edit_with_key(before, "");
+    }
+
+    fn commit_edit_with_key(&mut self, before: Snapshot, key_text: &str) {
+        let (start, before_end, after_end) =
+            changed_ranges(&before.text, &before.styles, &self.text, &self.styles);
+        let before_fragment = edit_fragment(&before.text, &before.styles, start..before_end);
+        let after_fragment = edit_fragment(&self.text, &self.styles, start..after_end);
+        let retained_bytes = transaction_bytes(&before_fragment, &after_fragment);
+        self.push_key_transaction(
+            EditTransaction {
+                start,
+                before: before_fragment,
+                after: after_fragment,
+                before_typing_style: before.typing_style,
+                after_typing_style: self.typing_style.clone(),
+                before_typing_override: before.typing_override,
+                after_typing_override: self.typing_override,
+                before_selection: before.selection,
+                after_selection: self.selection,
+                retained_bytes,
+            },
+            key_text,
+        );
+    }
+
+    fn push_transaction(&mut self, transaction: EditTransaction) {
+        self.typing_group_active = false;
+        self.redo.clear();
+        self.undo.push_back(transaction);
+        self.trim_history();
+    }
+
+    fn push_key_transaction(&mut self, transaction: EditTransaction, key_text: &str) {
+        let eligible = is_ordinary_typing(&transaction, key_text);
+        self.redo.clear();
+        if eligible && self.typing_group_active {
+            if let Some(previous) = self.undo.back_mut() {
+                if can_group_typing(previous, &transaction) {
+                    let mut text = String::with_capacity(
+                        previous.after.text.len() + transaction.after.text.len(),
+                    );
+                    text.push_str(&previous.after.text);
+                    text.push_str(&transaction.after.text);
+                    previous.after.text = Arc::from(text);
+                    previous.after.span_len += transaction.after.span_len;
+                    previous.after.styles[0].range.end = previous.after.span_len;
+                    previous.after_typing_style = transaction.after_typing_style;
+                    previous.after_typing_override = transaction.after_typing_override;
+                    previous.after_selection = transaction.after_selection;
+                    previous.retained_bytes = transaction_bytes(&previous.before, &previous.after);
+                    self.trim_history();
+                    return;
+                }
+            }
+        }
+        self.typing_group_active = eligible;
+        self.undo.push_back(transaction);
+        self.trim_history();
+    }
+
+    fn apply_transaction(&mut self, transaction: &EditTransaction, redo: bool) {
+        let (removed, inserted, typing_style, typing_override, selection) = if redo {
+            (
+                &transaction.before,
+                &transaction.after,
+                &transaction.after_typing_style,
+                transaction.after_typing_override,
+                transaction.after_selection,
+            )
+        } else {
+            (
+                &transaction.after,
+                &transaction.before,
+                &transaction.before_typing_style,
+                transaction.before_typing_override,
+                transaction.before_selection,
+            )
+        };
+        let range = transaction.start..transaction.start + removed.span_len;
+        debug_assert_eq!(
+            inserted.styles.last().map_or(0, |run| run.range.end),
+            inserted.span_len
+        );
+        self.replace_style_runs(range.start, range.end, &inserted.styles);
+        if !Arc::ptr_eq(&transaction.before.text, &transaction.after.text) {
+            debug_assert_eq!(removed.span_len, removed.text.len());
+            debug_assert_eq!(inserted.span_len, inserted.text.len());
+            self.text.replace_range(range, inserted.text.as_ref());
+        } else {
+            debug_assert_eq!(transaction.before.span_len, transaction.after.span_len);
+        }
+        self.typing_style = typing_style.clone();
+        self.typing_override = typing_override;
+        self.selection = selection;
         self.bump_revision();
+    }
+
+    fn trim_history(&mut self) {
+        while self.undo.len() + self.redo.len() > MAX_HISTORY
+            || self.history_retained_bytes() > MAX_HISTORY_BYTES
+                && self.undo.len() + self.redo.len() > 1
+        {
+            if !self.undo.is_empty() {
+                self.undo.pop_front();
+            } else {
+                self.redo.pop_front();
+            }
+        }
+    }
+
+    fn history_retained_bytes(&self) -> usize {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|snapshot| snapshot.retained_bytes)
+            .sum()
     }
 
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+fn style_at_runs(runs: &[ComposeStyleRun], byte: usize) -> Option<&CharacterStyle> {
+    let index = runs.partition_point(|run| run.range.end <= byte);
+    runs.get(index)
+        .filter(|run| run.range.start <= byte)
+        .map(|run| &run.style)
+}
+
+fn replaced_style_runs(
+    old: &[ComposeStyleRun],
+    start: usize,
+    end: usize,
+    inserted: &[ComposeStyleRun],
+) -> Vec<ComposeStyleRun> {
+    let inserted_len = inserted.last().map_or(0, |run| run.range.end);
+    let mut styles = Vec::with_capacity(old.len() + inserted.len() + 2);
+    for run in old {
+        if run.range.start < start {
+            push_style_run(
+                &mut styles,
+                run.range.start..run.range.end.min(start),
+                run.style.clone(),
+            );
+        }
+    }
+    for run in inserted {
+        push_style_run(
+            &mut styles,
+            start + run.range.start..start + run.range.end,
+            run.style.clone(),
+        );
+    }
+    for run in old {
+        if run.range.end > end {
+            push_style_run(
+                &mut styles,
+                start + inserted_len + run.range.start.max(end) - end
+                    ..start + inserted_len + run.range.end - end,
+                run.style.clone(),
+            );
+        }
+    }
+    styles
+}
+
+fn text_change_ranges(before: &str, after: &str) -> (usize, usize, usize) {
+    let before_bytes = before.as_bytes();
+    let after_bytes = after.as_bytes();
+    let mut start = before_bytes
+        .iter()
+        .zip(after_bytes)
+        .take_while(|(old, new)| old == new)
+        .count();
+    while !before.is_char_boundary(start) || !after.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut suffix = 0;
+    let limit = (before.len() - start).min(after.len() - start);
+    while suffix < limit
+        && before_bytes[before.len() - suffix - 1] == after_bytes[after.len() - suffix - 1]
+    {
+        suffix += 1;
+    }
+    while !before.is_char_boundary(before.len() - suffix)
+        || !after.is_char_boundary(after.len() - suffix)
+    {
+        suffix -= 1;
+    }
+    (start, before.len() - suffix, after.len() - suffix)
+}
+
+fn changed_ranges(
+    before_text: &str,
+    before_styles: &[ComposeStyleRun],
+    after_text: &str,
+    after_styles: &[ComposeStyleRun],
+) -> (usize, usize, usize) {
+    let before_bytes = before_text.as_bytes();
+    let after_bytes = after_text.as_bytes();
+    let mut text_prefix = before_bytes
+        .iter()
+        .zip(after_bytes)
+        .take_while(|(before, after)| before == after)
+        .count();
+    while !before_text.is_char_boundary(text_prefix) || !after_text.is_char_boundary(text_prefix) {
+        text_prefix -= 1;
+    }
+
+    let mut start = 0;
+    while start < text_prefix {
+        let before_run =
+            &before_styles[before_styles.partition_point(|run| run.range.end <= start)];
+        let after_run = &after_styles[after_styles.partition_point(|run| run.range.end <= start)];
+        if before_run.style != after_run.style {
+            break;
+        }
+        start = text_prefix
+            .min(before_run.range.end)
+            .min(after_run.range.end);
+    }
+
+    let mut text_suffix = 0;
+    let suffix_limit = (before_text.len() - start).min(after_text.len() - start);
+    while text_suffix < suffix_limit
+        && before_bytes[before_bytes.len() - text_suffix - 1]
+            == after_bytes[after_bytes.len() - text_suffix - 1]
+    {
+        text_suffix += 1;
+    }
+    while !before_text.is_char_boundary(before_text.len() - text_suffix)
+        || !after_text.is_char_boundary(after_text.len() - text_suffix)
+    {
+        text_suffix -= 1;
+    }
+
+    let mut style_suffix = 0;
+    while style_suffix < text_suffix {
+        let before_pos = before_text.len() - style_suffix - 1;
+        let after_pos = after_text.len() - style_suffix - 1;
+        let before_run =
+            &before_styles[before_styles.partition_point(|run| run.range.end <= before_pos)];
+        let after_run =
+            &after_styles[after_styles.partition_point(|run| run.range.end <= after_pos)];
+        if before_run.style != after_run.style {
+            break;
+        }
+        let step = (text_suffix - style_suffix)
+            .min(before_text.len() - style_suffix - before_run.range.start)
+            .min(after_text.len() - style_suffix - after_run.range.start);
+        style_suffix += step;
+    }
+
+    (
+        start,
+        before_text.len() - style_suffix,
+        after_text.len() - style_suffix,
+    )
+}
+
+fn edit_fragment(text: &str, styles: &[ComposeStyleRun], range: Range<usize>) -> EditFragment {
+    EditFragment {
+        text: Arc::from(&text[range.clone()]),
+        span_len: range.end - range.start,
+        styles: style_fragment(styles, range),
+    }
+}
+
+fn style_fragment(styles: &[ComposeStyleRun], range: Range<usize>) -> Vec<ComposeStyleRun> {
+    let mut fragment_styles = Vec::new();
+    for run in styles {
+        if run.range.start < range.end && run.range.end > range.start {
+            push_style_run(
+                &mut fragment_styles,
+                run.range.start.max(range.start) - range.start
+                    ..run.range.end.min(range.end) - range.start,
+                run.style.clone(),
+            );
+        }
+    }
+    fragment_styles
+}
+
+fn fragment_text_bytes(text: &Arc<str>) -> usize {
+    text.len() + 2 * std::mem::size_of::<usize>()
+}
+
+fn count_style_links(style: &CharacterStyle, seen: &mut HashSet<usize>, bytes: &mut usize) {
+    if let Some(link) = &style.link {
+        if seen.insert(Arc::as_ptr(link) as *const u8 as usize) {
+            *bytes += fragment_text_bytes(link);
+        }
+    }
+}
+
+fn transaction_bytes(before: &EditFragment, after: &EditFragment) -> usize {
+    let mut bytes = fragment_text_bytes(&before.text)
+        + (before.styles.capacity() + after.styles.capacity())
+            * std::mem::size_of::<ComposeStyleRun>();
+    if !Arc::ptr_eq(&before.text, &after.text) {
+        bytes += fragment_text_bytes(&after.text);
+    }
+    let mut seen_links = HashSet::new();
+    for run in before.styles.iter().chain(&after.styles) {
+        count_style_links(&run.style, &mut seen_links, &mut bytes);
+    }
+    bytes
+}
+
+fn is_ordinary_typing(transaction: &EditTransaction, key_text: &str) -> bool {
+    let mut characters = key_text.chars();
+    let Some(character) = characters.next() else {
+        return false;
+    };
+    character.is_alphanumeric()
+        && characters.next().is_none()
+        && transaction.before_selection == (to_i32(transaction.start), to_i32(transaction.start))
+        && transaction.before.span_len == 0
+        && transaction.before.text.is_empty()
+        && transaction.after.text.as_ref() == key_text
+        && transaction.after.span_len == key_text.len()
+        && transaction.after.styles.len() == 1
+        && transaction.after.styles[0].range == (0..key_text.len())
+        && transaction.after.styles[0].style == transaction.before_typing_style
+        && transaction.after_typing_style == transaction.before_typing_style
+        && transaction.after_typing_override == transaction.before_typing_override
+        && transaction.after_selection
+            == (
+                to_i32(transaction.start + key_text.len()),
+                to_i32(transaction.start + key_text.len()),
+            )
+}
+
+fn can_group_typing(previous: &EditTransaction, next: &EditTransaction) -> bool {
+    previous.before.span_len == 0
+        && previous.after.styles.len() == 1
+        && previous.after.span_len + next.after.span_len <= MAX_TYPING_GROUP_BYTES
+        && previous.start + previous.after.span_len == next.start
+        && previous.after.styles[0].style == next.after.styles[0].style
+        && previous.after_selection == next.before_selection
+        && previous.after_typing_style == next.before_typing_style
+        && previous.after_typing_override == next.before_typing_override
+}
+
+fn push_style_run(runs: &mut Vec<ComposeStyleRun>, range: Range<usize>, style: CharacterStyle) {
+    if range.is_empty() {
+        return;
+    }
+    if let Some(last) = runs.last_mut() {
+        debug_assert_eq!(last.range.end, range.start);
+        if last.range.end == range.start && last.style == style {
+            last.range.end = range.end;
+            return;
+        }
+    }
+    runs.push(ComposeStyleRun { range, style });
+}
+
+fn split_style_run_at(runs: &mut Vec<ComposeStyleRun>, byte: usize) {
+    if let Some(index) = runs
+        .iter()
+        .position(|run| run.range.start < byte && byte < run.range.end)
+    {
+        let original_end = runs[index].range.end;
+        let style = runs[index].style.clone();
+        runs[index].range.end = byte;
+        runs.insert(
+            index + 1,
+            ComposeStyleRun {
+                range: byte..original_end,
+                style,
+            },
+        );
     }
 }
 
@@ -652,33 +1171,33 @@ fn normalize_link(value: &str) -> Option<String> {
 /// a list/quote line. Enter on an empty item exits the block, matching common
 /// mail editors.
 fn continue_list_edit(old_text: &str, new_text: &str) -> Option<(String, i32)> {
-    let old = old_text.chars().collect::<Vec<_>>();
-    let mut new = new_text.chars().collect::<Vec<_>>();
-    if new.len() != old.len() + 1 {
+    if new_text.len() != old_text.len() + 1 {
         return None;
     }
-
-    let mut insertion = 0usize;
-    while insertion < old.len() && old[insertion] == new[insertion] {
-        insertion += 1;
-    }
-    if new.get(insertion) != Some(&'\n') || old[insertion..] != new[insertion + 1..] {
-        return None;
-    }
-
-    let line_start = old[..insertion]
+    let insertion = old_text
+        .as_bytes()
         .iter()
-        .rposition(|character| *character == '\n')
-        .map_or(0, |index| index + 1);
-    let line = &old[line_start..insertion];
-    let (kind, prefix_len) = block_prefix(line)?;
+        .zip(new_text.as_bytes())
+        .take_while(|(old, new)| old == new)
+        .count();
+    if !old_text.is_char_boundary(insertion)
+        || new_text.as_bytes().get(insertion) != Some(&b'\n')
+        || old_text[insertion..] != new_text[insertion + 1..]
+    {
+        return None;
+    }
+
+    let line_start = old_text[..insertion].rfind('\n').map_or(0, |byte| byte + 1);
+    let line = old_text[line_start..insertion].chars().collect::<Vec<_>>();
+    let (kind, prefix_len) = block_prefix(&line)?;
     let content_is_empty = line[prefix_len..]
         .iter()
         .all(|character| character.is_whitespace());
     if content_is_empty {
-        new.drain(line_start..=insertion);
-        let text = new.iter().collect::<String>();
-        return Some((text.clone(), to_i32(char_to_byte(&text, line_start))));
+        let mut text = String::with_capacity(new_text.len() - (insertion + 1 - line_start));
+        text.push_str(&new_text[..line_start]);
+        text.push_str(&new_text[insertion + 1..]);
+        return Some((text, to_i32(line_start)));
     }
 
     let prefix = match kind {
@@ -693,11 +1212,11 @@ fn continue_list_edit(old_text: &str, new_text: &str) -> Option<(String, i32)> {
             format!("{}. ", current.saturating_add(1))
         }
     };
-    let prefix = prefix.chars().collect::<Vec<_>>();
-    let cursor_character = insertion + 1 + prefix.len();
-    new.splice(insertion + 1..insertion + 1, prefix);
-    let text = new.iter().collect::<String>();
-    Some((text.clone(), to_i32(char_to_byte(&text, cursor_character))))
+    let mut text = String::with_capacity(new_text.len() + prefix.len());
+    text.push_str(&new_text[..insertion + 1]);
+    text.push_str(&prefix);
+    text.push_str(&new_text[insertion + 1..]);
+    Some((text, to_i32(insertion + 1 + prefix.len())))
 }
 
 fn block_prefix(chars: &[char]) -> Option<(BlockKind, usize)> {
@@ -851,6 +1370,43 @@ fn to_i32(value: usize) -> i32 {
 mod tests {
     use super::*;
 
+    fn assert_style_coverage(document: &RichComposeDocument) {
+        let mut end = 0;
+        for run in &document.styles {
+            assert_eq!(run.range.start, end);
+            assert!(run.range.end > run.range.start);
+            assert!(document.text.is_char_boundary(run.range.start));
+            assert!(document.text.is_char_boundary(run.range.end));
+            end = run.range.end;
+        }
+        assert_eq!(end, document.text.len());
+        assert!(
+            document
+                .styles
+                .windows(2)
+                .all(|pair| pair[0].style != pair[1].style)
+        );
+    }
+
+    fn assert_fixture_state(
+        document: &RichComposeDocument,
+        text: &str,
+        html: &str,
+        selection: (i32, i32),
+        runs: &[(Range<usize>, u8, Option<&str>)],
+    ) {
+        assert_eq!(document.text(), text);
+        assert_eq!(document.body_html().as_deref(), Some(html));
+        assert_eq!(document.selection, selection);
+        assert_eq!(document.styles.len(), runs.len());
+        for (actual, expected) in document.styles.iter().zip(runs) {
+            assert_eq!(actual.range, expected.0);
+            assert_eq!(actual.style.marks, expected.1);
+            assert_eq!(actual.style.link.as_deref(), expected.2);
+        }
+        assert_style_coverage(document);
+    }
+
     #[test]
     fn inline_formatting_never_changes_editable_text() {
         let mut document = RichComposeDocument::default();
@@ -932,6 +1488,22 @@ mod tests {
     }
 
     #[test]
+    fn enter_continues_a_list_after_multibyte_text() {
+        let mut document = RichComposeDocument::default();
+        let original = "• café";
+        document.synchronize(original, original.len() as i32, original.len() as i32);
+        let entered = format!("{original}\n");
+        let selection = document.synchronize(&entered, entered.len() as i32, entered.len() as i32);
+        assert_eq!(document.text(), "• café\n• ");
+        assert_eq!(selection.start as usize, document.text().len());
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), original);
+        document.history("redo").unwrap();
+        assert_eq!(document.text(), "• café\n• ");
+        assert_style_coverage(&document);
+    }
+
+    #[test]
     fn enter_on_empty_list_item_exits_the_list() {
         let mut document = RichComposeDocument::default();
         document.synchronize("• First\n• ", 14, 14);
@@ -945,6 +1517,21 @@ mod tests {
         let mut document = RichComposeDocument::default();
         let text = "Read https://slint.dev/blog/slint-1.7-released for details.";
         document.synchronize(text, text.len() as i32, text.len() as i32);
+        let link_start = "Read ".len();
+        let link_end = text.find(" for details.").unwrap();
+        let link = document
+            .style_at(link_start)
+            .unwrap()
+            .link
+            .as_ref()
+            .unwrap();
+        assert!(
+            document
+                .styles
+                .iter()
+                .filter(|run| run.range.start < link_end && run.range.end > link_start)
+                .all(|run| Arc::ptr_eq(link, run.style.link.as_ref().unwrap()))
+        );
         assert_eq!(
             document.body_html().as_deref(),
             Some(
@@ -977,6 +1564,568 @@ mod tests {
         document.format("bold", "Hello", 0, 5);
         document.history("undo").unwrap();
         assert_eq!(document.body_html().as_deref(), Some("<div>Hello</div>"));
+    }
+
+    #[test]
+    fn long_draft_history_stays_within_byte_budget_and_keeps_recent_undo() {
+        let mut document = RichComposeDocument::default();
+        let initial = "x".repeat(1024 * 1024);
+        document.synchronize(&initial, initial.len() as i32, initial.len() as i32);
+        for _ in 0..40 {
+            document.insert_text("y");
+        }
+
+        assert!(document.history_retained_bytes() <= MAX_HISTORY_BYTES);
+        assert_eq!(document.undo.len(), 41);
+        assert!(document.history_retained_bytes() < 2 * 1024 * 1024);
+        assert_eq!(document.styles.len(), 1);
+        let latest = document.text().to_owned();
+        document.history("undo").unwrap();
+        assert_eq!(document.text().len(), latest.len() - 1);
+        document.history("redo").unwrap();
+        assert_eq!(document.text(), latest);
+
+        document.history("undo").unwrap();
+        document.insert_text("z");
+        assert!(document.history("redo").is_none());
+    }
+
+    #[test]
+    fn synchronized_long_unicode_edit_retains_only_changed_history_text() {
+        let mut document = RichComposeDocument::default();
+        let original = "é".repeat(512 * 1024);
+        document.synchronize(&original, original.len() as i32, original.len() as i32);
+        let edited = format!("{original}界");
+        document.synchronize(&edited, edited.len() as i32, edited.len() as i32);
+        let latest = document.undo.back().unwrap();
+        assert_eq!(latest.before.text.as_ref(), "");
+        assert_eq!(latest.after.text.as_ref(), "界");
+        assert!(document.history_retained_bytes() < 2 * 1024 * 1024);
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), original);
+        document.history("redo").unwrap();
+        assert_eq!(document.text(), edited);
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn small_style_edits_in_long_draft_retain_only_the_selection() {
+        let mut document = RichComposeDocument::default();
+        let draft = "x".repeat(1024 * 1024);
+        document.synchronize(&draft, 0, 0);
+        document.undo.clear();
+        let start = (draft.len() / 2) as i32;
+        let end = start + 1;
+        let text_pointer = document.text.as_ptr();
+
+        document.format("bold", &draft, start, end);
+        let latest = document.undo.back().unwrap();
+        assert_eq!(latest.before.text.as_ref(), "");
+        assert_eq!(latest.before.span_len, 1);
+        assert!(Arc::ptr_eq(&latest.before.text, &latest.after.text));
+        assert!(document.history_retained_bytes() < 1024);
+        assert!(document.active_marks().bold);
+        document.history("undo").unwrap();
+        assert!(!document.active_marks().bold);
+        assert_eq!(document.text.as_ptr(), text_pointer);
+        document.history("redo").unwrap();
+        assert!(document.active_marks().bold);
+
+        document.set_link("example.org", &draft, start, end);
+        let latest = document.undo.back().unwrap();
+        assert!(Arc::ptr_eq(&latest.before.text, &latest.after.text));
+        assert!(latest.retained_bytes < 1024);
+        document.history("undo").unwrap();
+        assert_eq!(document.active_link(), None);
+        document.history("redo").unwrap();
+        assert_eq!(document.active_link(), Some("https://example.org"));
+        assert_eq!(document.text.as_ptr(), text_pointer);
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn formatting_entire_long_draft_keeps_text_out_of_history() {
+        let mut document = RichComposeDocument::default();
+        let draft = "x".repeat(1024 * 1024);
+        document.synchronize(&draft, 0, 0);
+        document.undo.clear();
+        document.format("bold", &draft, 0, draft.len() as i32);
+        let transaction = document.undo.back().unwrap();
+        assert_eq!(transaction.before.span_len, draft.len());
+        assert_eq!(transaction.before.text.as_ref(), "");
+        assert_eq!(transaction.after.text.as_ref(), "");
+        assert!(transaction.retained_bytes < 1024);
+        document.history("undo").unwrap();
+        assert!(!document.active_marks().bold);
+        document.history("redo").unwrap();
+        assert!(document.active_marks().bold);
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn unicode_edits_preserve_compact_formatting_through_undo_and_redo() {
+        let mut document = RichComposeDocument::default();
+        let text = "Aé👩‍🚀Z";
+        let bold_end = text.find('Z').unwrap();
+        document.synchronize(text, 1, bold_end as i32);
+        document.format("bold", text, 1, bold_end as i32);
+        assert_eq!(document.styles.len(), 3);
+        assert_style_coverage(&document);
+
+        let after_accent = "Aé".len() as i32;
+        document.update_selection(after_accent, after_accent);
+        document.insert_text("界");
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div>A<strong>é界👩‍🚀</strong>Z</div>")
+        );
+        assert_eq!(document.styles.len(), 3);
+        assert_style_coverage(&document);
+
+        let shortened = "Aé界Z";
+        document.synchronize(shortened, shortened.len() as i32, shortened.len() as i32);
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div>A<strong>é界</strong>Z</div>")
+        );
+        assert_style_coverage(&document);
+        document.history("undo").unwrap();
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div>A<strong>é界👩‍🚀</strong>Z</div>")
+        );
+        assert_style_coverage(&document);
+        document.history("redo").unwrap();
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div>A<strong>é界</strong>Z</div>")
+        );
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn undo_replays_automatic_link_changes_and_block_formatting() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize("http://a", 8, 8);
+        assert_eq!(document.active_link(), None);
+        document.insert_text("b");
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div><a href=\"http://ab\">http://ab</a></div>")
+        );
+        document.history("undo").unwrap();
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div><a href=\"http://a\">http://a</a></div>")
+        );
+        document.history("redo").unwrap();
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div><a href=\"http://ab\">http://ab</a></div>")
+        );
+        assert_style_coverage(&document);
+
+        document.reset();
+        document.synchronize("One\nTwo", 0, 7);
+        document.format("bullet", "One\nTwo", 0, 7);
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<ul><li>One</li><li>Two</li></ul>")
+        );
+        document.history("undo").unwrap();
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<div>One</div><div>Two</div>")
+        );
+        document.history("redo").unwrap();
+        assert_eq!(
+            document.body_html().as_deref(),
+            Some("<ul><li>One</li><li>Two</li></ul>")
+        );
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn history_entry_limit_keeps_the_recent_128_edits() {
+        let mut document = RichComposeDocument::default();
+        for _ in 0..140 {
+            document.insert_text("x");
+        }
+        assert_eq!(document.undo.len(), MAX_HISTORY);
+        for _ in 0..MAX_HISTORY {
+            document.history("undo").unwrap();
+        }
+        assert_eq!(document.text().len(), 140 - MAX_HISTORY);
+        assert!(document.history("undo").is_none());
+        for _ in 0..MAX_HISTORY {
+            document.history("redo").unwrap();
+        }
+        assert_eq!(document.text().len(), 140);
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn linked_characters_and_snapshots_share_one_link_allocation() {
+        let mut document = RichComposeDocument::default();
+        let label = "linked passage";
+        document.synchronize(label, 0, label.len() as i32);
+        document.set_link("example.org", label, 0, label.len() as i32);
+        let first = document.styles[0].style.link.as_ref().unwrap().clone();
+        assert!(
+            document
+                .styles
+                .iter()
+                .all(|run| Arc::ptr_eq(&first, run.style.link.as_ref().unwrap()))
+        );
+
+        document.insert_text("!");
+        let snapshot_link = document.undo.back().unwrap().before.styles[0]
+            .style
+            .link
+            .as_ref()
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, snapshot_link));
+        document.history("undo").unwrap();
+        assert_eq!(document.active_link(), Some("https://example.org"));
+        assert_eq!(
+            document.styles[0].style.link.as_deref(),
+            Some("https://example.org")
+        );
+    }
+
+    #[test]
+    fn memory_usage_counts_shared_style_only_payloads_once() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize("linked passage", 0, 14);
+        document.set_link("example.org", "linked passage", 0, 14);
+        let transaction = document.undo.back().unwrap();
+        assert!(Arc::ptr_eq(
+            &transaction.before.text,
+            &transaction.after.text
+        ));
+        let usage = document.memory_usage();
+        let link = document.styles[0].style.link.as_ref().unwrap();
+        assert_eq!(usage.link_bytes, fragment_text_bytes(link));
+        assert!(usage.undo_bytes >= fragment_text_bytes(&transaction.before.text));
+        assert_eq!(
+            usage.total_bytes,
+            std::mem::size_of::<RichComposeDocument>()
+                + usage.text_capacity
+                + usage.style_run_bytes
+                + usage.link_bytes
+                + usage.undo_bytes
+                + usage.redo_bytes
+        );
+        document.history("undo").unwrap();
+        let undone = document.memory_usage();
+        assert_eq!(undone.link_bytes, usage.link_bytes);
+        assert_eq!(document.text(), "linked passage");
+    }
+
+    #[test]
+    fn transaction_budget_counts_a_shared_link_once_across_runs() {
+        let link: Arc<str> = Arc::from("https://example.org/long/path");
+        let text: Arc<str> = Arc::from("ab");
+        let styles = vec![
+            ComposeStyleRun {
+                range: 0..1,
+                style: CharacterStyle {
+                    marks: BOLD,
+                    link: Some(link.clone()),
+                    link_is_auto: false,
+                },
+            },
+            ComposeStyleRun {
+                range: 1..2,
+                style: CharacterStyle {
+                    marks: ITALIC,
+                    link: Some(link.clone()),
+                    link_is_auto: false,
+                },
+            },
+        ];
+        let before = EditFragment {
+            text: text.clone(),
+            span_len: 2,
+            styles: styles.clone(),
+        };
+        let after = EditFragment {
+            text,
+            span_len: 2,
+            styles,
+        };
+        assert_eq!(
+            transaction_bytes(&before, &after),
+            fragment_text_bytes(&before.text)
+                + (before.styles.capacity() + after.styles.capacity())
+                    * std::mem::size_of::<ComposeStyleRun>()
+                + fragment_text_bytes(&link)
+        );
+    }
+
+    #[test]
+    fn ordinary_key_edits_group_into_bounded_undo_steps() {
+        let mut document = RichComposeDocument::default();
+        for character in "hello".chars() {
+            let mut next = document.text().to_owned();
+            next.push(character);
+            let end = next.len() as i32;
+            document.synchronize_key_edit(&next, end, end, &character.to_string());
+        }
+        assert_eq!(document.undo.len(), 1);
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "");
+        document.history("redo").unwrap();
+        assert_eq!(document.text(), "hello");
+
+        document.reset();
+        for _ in 0..130 {
+            let mut next = document.text().to_owned();
+            next.push('x');
+            let end = next.len() as i32;
+            document.synchronize_key_edit(&next, end, end, "x");
+        }
+        assert_eq!(document.undo.len(), 3);
+        document.history("undo").unwrap();
+        assert_eq!(document.text().len(), 128);
+    }
+
+    #[test]
+    fn typing_groups_break_on_selection_paste_and_ime_edits() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize_key_edit("a", 1, 1, "a");
+        document.synchronize_key_edit("ab", 2, 2, "b");
+        document.update_selection(0, 0);
+        document.update_selection(2, 2);
+        document.synchronize_key_edit("abc", 3, 3, "c");
+        assert_eq!(document.undo.len(), 2);
+
+        document.synchronize("abcP", 4, 4); // Paste has no key context.
+        document.synchronize_key_edit("abcPq", 5, 5, "q");
+        document.synchronize("abcPq語", 8, 8); // IME commit has no key context.
+        assert_eq!(document.undo.len(), 5);
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "abcPq");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "abcP");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "abc");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "ab");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "");
+    }
+
+    #[test]
+    fn grouped_unicode_typing_in_middle_preserves_following_text() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize("left right", 5, 5);
+        document.synchronize_key_edit("left 語right", 8, 8, "語");
+        document.synchronize_key_edit("left 語界right", 11, 11, "界");
+        assert_eq!(document.undo.len(), 2);
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "left right");
+        assert_eq!(document.selection(), ComposeSelection { start: 5, end: 5 });
+        document.history("redo").unwrap();
+        assert_eq!(document.text(), "left 語界right");
+        assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn new_typing_after_partial_undo_discards_redo() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize_key_edit("a", 1, 1, "a");
+        document.synchronize_key_edit("ab", 2, 2, "b");
+        document.synchronize_key_edit("ab ", 3, 3, " ");
+        document.history("undo").unwrap();
+        document.synchronize_key_edit("abc", 3, 3, "c");
+        assert_eq!(document.text(), "abc");
+        assert!(document.redo.is_empty());
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "ab");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "");
+    }
+
+    #[test]
+    fn formatting_and_word_boundaries_break_typing_groups() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize_key_edit("a", 1, 1, "a");
+        document.synchronize_key_edit("ab", 2, 2, "b");
+        document.synchronize_key_edit("ab ", 3, 3, " ");
+        document.format("bold", "ab ", 0, 2);
+        document.update_selection(3, 3);
+        document.synchronize_key_edit("ab c", 4, 4, "c");
+        assert_eq!(document.undo.len(), 4);
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "ab ");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "ab ");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "ab");
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), "");
+    }
+
+    #[test]
+    fn rtl_grapheme_and_link_fixture_matches_original_edit_history() {
+        // These checkpoints were captured from the original per-character
+        // composer before the compact-run and transaction changes.
+        let mut document = RichComposeDocument::default();
+        let initial = "אבג e\u{301} 👩‍🚀\nمرحبا";
+        let appended = format!("{initial}!");
+        let plain_html = "<div>אבג e\u{301} 👩‍🚀</div><div>مرحبا</div>";
+        let bold_html = "<div><strong>אבג</strong> e\u{301} 👩‍🚀</div><div>مرحبا</div>";
+        let link_html = "<div><strong>אבג</strong> e\u{301} <a href=\"https://example.org/a?b=1&amp;c=2\">👩‍🚀</a></div><div>مرحبا</div>";
+        let italic_html = "<div><strong>אבג</strong> <em>e\u{301}</em> <a href=\"https://example.org/a?b=1&amp;c=2\">👩‍🚀</a></div><div>مرحبا</div>";
+        let appended_html = "<div><strong>אבג</strong> <em>e\u{301}</em> <a href=\"https://example.org/a?b=1&amp;c=2\">👩‍🚀</a></div><div>مرحبا!</div>";
+        let href = "https://example.org/a?b=1&c=2";
+        let plain_runs = [(0..33, 0, None)];
+        let bold_runs = [(0..6, BOLD, None), (6..33, 0, None)];
+        let link_runs = [
+            (0..6, BOLD, None),
+            (6..11, 0, None),
+            (11..22, 0, Some(href)),
+            (22..33, 0, None),
+        ];
+        let italic_runs = [
+            (0..6, BOLD, None),
+            (6..7, 0, None),
+            (7..10, ITALIC, None),
+            (10..11, 0, None),
+            (11..22, 0, Some(href)),
+            (22..33, 0, None),
+        ];
+        let appended_runs = [
+            (0..6, BOLD, None),
+            (6..7, 0, None),
+            (7..10, ITALIC, None),
+            (10..11, 0, None),
+            (11..22, 0, Some(href)),
+            (22..34, 0, None),
+        ];
+
+        document.synchronize(initial, 33, 33);
+        assert_fixture_state(&document, initial, plain_html, (33, 33), &plain_runs);
+        document.format("bold", initial, 0, 6);
+        assert_fixture_state(&document, initial, bold_html, (0, 6), &bold_runs);
+        document.set_link("example.org/a?b=1&c=2", initial, 11, 22);
+        assert_fixture_state(&document, initial, link_html, (11, 22), &link_runs);
+        document.format("italic", initial, 7, 10);
+        assert_fixture_state(&document, initial, italic_html, (7, 10), &italic_runs);
+        document.update_selection(33, 33);
+        document.synchronize(&appended, 34, 34);
+        assert_fixture_state(
+            &document,
+            &appended,
+            appended_html,
+            (34, 34),
+            &appended_runs,
+        );
+
+        document.history("undo").unwrap();
+        assert_fixture_state(&document, initial, italic_html, (33, 33), &italic_runs);
+        document.history("undo").unwrap();
+        assert_fixture_state(&document, initial, link_html, (7, 10), &link_runs);
+        document.history("undo").unwrap();
+        assert_fixture_state(&document, initial, bold_html, (11, 22), &bold_runs);
+        document.history("undo").unwrap();
+        assert_fixture_state(&document, initial, plain_html, (0, 6), &plain_runs);
+
+        document.history("redo").unwrap();
+        assert_fixture_state(&document, initial, bold_html, (11, 22), &bold_runs);
+        document.history("redo").unwrap();
+        assert_fixture_state(&document, initial, link_html, (7, 10), &link_runs);
+        document.history("redo").unwrap();
+        assert_fixture_state(&document, initial, italic_html, (33, 33), &italic_runs);
+        document.history("redo").unwrap();
+        assert_fixture_state(
+            &document,
+            &appended,
+            appended_html,
+            (34, 34),
+            &appended_runs,
+        );
+    }
+
+    #[test]
+    fn rtl_block_modes_and_line_break_fixture_matches_original_history() {
+        let mut document = RichComposeDocument::default();
+        let plain = "שלום\nمرحبا\nCafe\u{301}";
+        let bullet = "• שלום\n• مرحبا\n• Cafe\u{301}";
+        let continued = "• שלום\n• مرحبا\n• Cafe\u{301}\n• ";
+        let numbered = "1. שלום\n2. مرحبا\n3. Cafe\u{301}\n4. ";
+        let quoted = "│ שלום\n│ مرحبا\n│ Cafe\u{301}\n│ ";
+        let plain_html = "<div>שלום</div><div>مرحبا</div><div>Cafe\u{301}</div>";
+        let bullet_html = "<ul><li>שלום</li><li>مرحبا</li><li>Cafe\u{301}</li></ul>";
+        let continued_html = "<ul><li>שלום</li><li>مرحبا</li><li>Cafe\u{301}</li><li></li></ul>";
+        let numbered_html = "<ol><li>שלום</li><li>مرحبا</li><li>Cafe\u{301}</li><li></li></ol>";
+        let quoted_html = "<blockquote>שלום</blockquote><blockquote>مرحبا</blockquote><blockquote>Cafe\u{301}</blockquote><blockquote><br></blockquote>";
+
+        document.synchronize(plain, 0, 26);
+        assert_fixture_state(&document, plain, plain_html, (0, 26), &[(0..26, 0, None)]);
+        document.format("bullet", plain, 0, 26);
+        assert_fixture_state(&document, bullet, bullet_html, (0, 38), &[(0..38, 0, None)]);
+        let entered = format!("{bullet}\n");
+        document.synchronize(&entered, entered.len() as i32, entered.len() as i32);
+        assert_fixture_state(
+            &document,
+            continued,
+            continued_html,
+            (43, 43),
+            &[(0..43, 0, None)],
+        );
+        document.history("undo").unwrap();
+        assert_fixture_state(&document, bullet, bullet_html, (0, 38), &[(0..38, 0, None)]);
+        document.history("undo").unwrap();
+        assert_fixture_state(&document, plain, plain_html, (0, 26), &[(0..26, 0, None)]);
+        document.history("redo").unwrap();
+        assert_fixture_state(&document, bullet, bullet_html, (0, 38), &[(0..38, 0, None)]);
+        document.history("redo").unwrap();
+        assert_fixture_state(
+            &document,
+            continued,
+            continued_html,
+            (43, 43),
+            &[(0..43, 0, None)],
+        );
+
+        document.format("number", continued, 0, 43);
+        assert_fixture_state(
+            &document,
+            numbered,
+            numbered_html,
+            (0, 39),
+            &[(0..39, 0, None)],
+        );
+        document.format("quote", numbered, 0, 39);
+        assert_fixture_state(&document, quoted, quoted_html, (0, 43), &[(0..43, 0, None)]);
+        document.history("undo").unwrap();
+        assert_fixture_state(
+            &document,
+            numbered,
+            numbered_html,
+            (0, 39),
+            &[(0..39, 0, None)],
+        );
+        document.history("undo").unwrap();
+        assert_fixture_state(
+            &document,
+            continued,
+            continued_html,
+            (0, 43),
+            &[(0..43, 0, None)],
+        );
+        document.history("redo").unwrap();
+        assert_fixture_state(
+            &document,
+            numbered,
+            numbered_html,
+            (0, 39),
+            &[(0..39, 0, None)],
+        );
+        document.history("redo").unwrap();
+        assert_fixture_state(&document, quoted, quoted_html, (0, 43), &[(0..43, 0, None)]);
     }
 
     #[test]

@@ -70,8 +70,8 @@ export component EmailComposer inherits Rectangle {
     callback remove-attachment(int);
     callback format-requested(string, string, int, int);
     callback link-requested(string, string, int, int);
-    callback body-edited(string, int, int);
-    callback selection-changed(int, int);
+    callback body-edited(string, int, int, string);
+    callback selection-changed(string, int, int);
     callback history-requested(string);
     callback editor-pointer-event(float, float, string, bool, bool, bool, bool);
     callback editor-key-event(string, bool, bool, bool, bool) -> bool;
@@ -90,6 +90,8 @@ export component EmailComposer inherits Rectangle {
     private property <int> link-selection-start: 0;
     private property <int> link-selection-end: 0;
     private property <bool> caret-visible: true;
+    private property <string> pending-key-text: "";
+    private property <bool> ime-edit-pending: false;
     private property <length> input-caret-x: 0px;
     private property <length> input-caret-y: 0px;
     private property <bool> has-content: root.to != "" || root.cc != "" || root.bcc != ""
@@ -163,6 +165,10 @@ export component EmailComposer inherits Rectangle {
     changed editor-viewport-height => { root.editor-layout-changed(); }
     changed editor-scroll-y => { editor-scroll-layout-timer.restart(); }
     changed editor-preedit-text => {
+        if (root.editor-preedit-text != "") {
+            root.ime-edit-pending = true;
+            root.pending-key-text = "";
+        }
         root.editor-layout-changed();
         // Re-submit the unchanged selection so Slint refreshes the native
         // candidate rectangle after cosmic-text advances the preedit caret.
@@ -385,10 +391,14 @@ export component EmailComposer inherits Rectangle {
                             self.text,
                             self.anchor-position-byte-offset,
                             self.cursor-position_byte_offset,
+                            root.ime-edit-pending ? "" : root.pending-key-text,
                         );
+                        root.pending-key-text = "";
+                        root.ime-edit-pending = false;
                         self.set-selection-offsets(root.selection-start, root.selection-end);
                     }
                     key-pressed(event) => {
+                        root.pending-key-text = "";
                         if ((event.modifiers.control || event.modifiers.meta) && event.text.to-lowercase() == "b") {
                             root.apply-format("bold");
                             return accept;
@@ -424,6 +434,10 @@ export component EmailComposer inherits Rectangle {
                             self.set-selection-offsets(root.selection-start, root.selection-end);
                             return accept;
                         }
+                        if (!event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta
+                            && root.editor-preedit-text == "" && !root.ime-edit-pending) {
+                            root.pending-key-text = event.text;
+                        }
                         reject
                     }
                     cursor-position-changed(position) => {
@@ -431,6 +445,7 @@ export component EmailComposer inherits Rectangle {
                         root.input-caret-y = position.y;
                         root.caret-visible = true;
                         root.selection-changed(
+                            self.text,
                             self.anchor-position-byte-offset,
                             self.cursor-position_byte_offset,
                         );

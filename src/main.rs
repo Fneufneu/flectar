@@ -5698,12 +5698,13 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     let app_weak = app.as_weak();
     let document_for_edit = Rc::clone(&compose_document);
     let editor_for_edit = Rc::clone(&compose_editor);
-    app.on_edit_compose_body(move |body, anchor, cursor| {
+    app.on_edit_compose_body(move |body, anchor, cursor, key_text| {
         let Some(app) = app_weak.upgrade() else {
             return;
         };
         let mut document = document_for_edit.borrow_mut();
-        let selection = document.synchronize(body.as_str(), anchor, cursor);
+        let selection =
+            document.synchronize_key_edit(body.as_str(), anchor, cursor, key_text.as_str());
         apply_rich_compose(
             &app,
             &document,
@@ -5715,11 +5716,17 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     let app_weak = app.as_weak();
     let document_for_selection = Rc::clone(&compose_document);
     let editor_for_selection = Rc::clone(&compose_editor);
-    app.on_update_compose_selection(move |anchor, cursor| {
+    app.on_update_compose_selection(move |body, anchor, cursor| {
         let Some(app) = app_weak.upgrade() else {
             return;
         };
         let mut document = document_for_selection.borrow_mut();
+        // Slint emits the new caret position before `edited`. The document
+        // still has the old text at that point, so wait for the edit callback
+        // to update both text and selection together.
+        if body.as_str() != document.text() {
+            return;
+        }
         let selection = document.update_selection(anchor, cursor);
         apply_rich_compose_state(&app, &document, selection);
         apply_compose_editor_surface(

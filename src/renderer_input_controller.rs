@@ -107,7 +107,9 @@ pub(super) fn register_renderer_input_callbacks(
                     "subject" => app.set_compose_subject(value.into_owned().into()),
                     "cc" => app.set_compose_cc(value.into_owned().into()),
                     "bcc" => app.set_compose_bcc(value.into_owned().into()),
-                    "body" => app.invoke_edit_compose_body(value.into_owned().into(), 0, 0),
+                    "body" => {
+                        app.invoke_edit_compose_body(value.into_owned().into(), 0, 0, "".into())
+                    }
                     _ => {}
                 }
             }
