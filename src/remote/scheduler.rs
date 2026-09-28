@@ -1,10 +1,17 @@
 use super::{ResourcePriorities, resource_key};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+
+// A fixed unit keeps semaphore permits small while bounding overlapping
+// decoder, resize, and output buffers across all email documents.
+const DECODE_UNIT_BYTES: u64 = 1024 * 1024;
+const DECODE_BUDGET_UNITS: u32 = 128;
 
 pub(super) struct Scheduler {
     state: Mutex<State>,
     changed: Notify,
+    decode_bytes: Arc<Semaphore>,
+    decode_budget_units: u32,
     limit: usize,
     remote_limit: usize,
 }
@@ -36,12 +43,38 @@ pub(super) fn shared() -> Arc<Scheduler> {
 
 impl Scheduler {
     pub(super) fn new(limit: usize, remote_limit: usize) -> Arc<Self> {
+        Self::with_decode_budget(limit, remote_limit, DECODE_BUDGET_UNITS)
+    }
+
+    fn with_decode_budget(
+        limit: usize,
+        remote_limit: usize,
+        decode_budget_units: u32,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
             changed: Notify::new(),
+            decode_bytes: Arc::new(Semaphore::new(decode_budget_units as usize)),
+            decode_budget_units,
             limit,
             remote_limit,
         })
+    }
+
+    pub(super) async fn acquire_decode_bytes(
+        &self,
+        estimated_bytes: u64,
+    ) -> Option<OwnedSemaphorePermit> {
+        let units = estimated_bytes.div_ceil(DECODE_UNIT_BYTES).max(1);
+        let units = u32::try_from(units).ok()?;
+        if units > self.decode_budget_units {
+            return None;
+        }
+        self.decode_bytes
+            .clone()
+            .acquire_many_owned(units)
+            .await
+            .ok()
     }
     pub(super) fn reprioritize(&self) {
         self.changed.notify_waiters();
@@ -243,5 +276,59 @@ mod tests {
         drop(remote);
         drop(local);
         drop(queued.await);
+    }
+
+    #[tokio::test]
+    async fn decode_byte_budget_waits_and_releases_after_work() {
+        let scheduler = Scheduler::with_decode_budget(4, 3, 4);
+        let held = scheduler
+            .acquire_decode_bytes(3 * DECODE_UNIT_BYTES)
+            .await
+            .unwrap();
+        let mut waiting = Box::pin(scheduler.acquire_decode_bytes(2 * DECODE_UNIT_BYTES));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiting)
+                .await
+                .is_err()
+        );
+        // Tokio reserves the spare unit for the first queued waiter.
+        assert_eq!(scheduler.decode_bytes.available_permits(), 0);
+        drop(held);
+        let acquired = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(scheduler.decode_bytes.available_permits(), 2);
+        drop(acquired);
+        assert_eq!(scheduler.decode_bytes.available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn oversized_and_cancelled_decode_waits_leave_budget_available() {
+        let scheduler = Scheduler::with_decode_budget(4, 3, 2);
+        assert!(
+            scheduler
+                .acquire_decode_bytes(3 * DECODE_UNIT_BYTES)
+                .await
+                .is_none()
+        );
+        let held = scheduler
+            .acquire_decode_bytes(2 * DECODE_UNIT_BYTES)
+            .await
+            .unwrap();
+        let mut waiting = Box::pin(scheduler.acquire_decode_bytes(DECODE_UNIT_BYTES));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(waiting);
+        drop(held);
+        assert_eq!(scheduler.decode_bytes.available_permits(), 2);
+        let next = scheduler
+            .acquire_decode_bytes(DECODE_UNIT_BYTES)
+            .await
+            .unwrap();
+        drop(next);
     }
 }

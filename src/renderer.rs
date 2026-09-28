@@ -393,6 +393,10 @@ impl GpuEmailRenderer {
 
     pub fn set_email(&mut self, email: PreparedEmail) {
         self.fit_viewport = None;
+        // Abort and drop the previous document before pruning its resource
+        // state. A late decode sees the abort signal and cannot reinsert it.
+        self.active_document.store(usize::MAX, Ordering::Release);
+        drop(self.email.take());
         self.resources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -87,6 +87,13 @@ fn record(ledger: &ResourceLedger, id: usize, url: &str, state: ResourceState) {
     map.insert(resource_key(id, url), state);
 }
 
+fn forget_resource(ledger: &ResourceLedger, id: usize, url: &str) {
+    ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&resource_key(id, url));
+}
+
 struct LimitedImageProvider {
     ledger: ResourceLedger,
     #[cfg(feature = "remote-content")]
@@ -178,6 +185,7 @@ impl NetProvider for LimitedImageProvider {
             let started = crate::renderer::render_timings_enabled().then(std::time::Instant::now);
             let work = async {
                 let permit = scheduler
+                    .clone()
                     .acquire(document_id, request.url.as_str(), embedded, priorities)
                     .await;
                 let queued = started.map(|start| start.elapsed());
@@ -201,6 +209,32 @@ impl NetProvider for LimitedImageProvider {
                         bytes.len()
                     );
                 }
+                let Some(image_work) = validated_image_work(&bytes) else {
+                    record(
+                        &ledger,
+                        document_id,
+                        request.url.as_str(),
+                        ResourceState::Limited,
+                    );
+                    waker.wake(document_id);
+                    return None;
+                };
+                // The byte permit is acquired before the image decoder can
+                // allocate pixels. A cancelled waiter releases its slot; once
+                // spawned, the blocking worker owns both permits until done.
+                let Some(decode_permit) = scheduler
+                    .acquire_decode_bytes(image_work.estimated_bytes)
+                    .await
+                else {
+                    record(
+                        &ledger,
+                        document_id,
+                        request.url.as_str(),
+                        ResourceState::Limited,
+                    );
+                    waker.wake(document_id);
+                    return None;
+                };
                 let signal = request.signal.clone();
                 let url = request.url.to_string();
                 let ledger = ledger.clone();
@@ -209,29 +243,45 @@ impl NetProvider for LimitedImageProvider {
                 // both off Tokio's async executor and hold the work permit.
                 tokio::task::spawn_blocking(move || {
                     let _permit = permit;
+                    let _decode_permit = decode_permit;
                     let decode_start = started.map(|_| std::time::Instant::now());
                     if signal.as_ref().is_some_and(|s| s.aborted()) {
                         return;
                     }
-                    if let Some(pixels) = validated_pixel_count(&bytes)
-                        && reserve_image(&budgets, document_id, bytes.len() as u64, pixels)
-                    {
+                    if reserve_image(&budgets, document_id, bytes.len() as u64, image_work.pixels) {
                         let decoded =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 handler.bytes(url.clone(), Bytes::from(bytes));
                             }));
-                        record(
-                            &ledger,
-                            document_id,
-                            &url,
-                            if decoded.is_ok() {
-                                ResourceState::Ready
-                            } else {
-                                ResourceState::Failed
-                            },
-                        );
+                        if signal.as_ref().is_some_and(|s| s.aborted()) {
+                            // Navigation may abort while Blitz is decoding.
+                            // Its old document receiver then drops the image;
+                            // do not restore this URL to the shared ledger.
+                            forget_resource(&ledger, document_id, &url);
+                        } else {
+                            record(
+                                &ledger,
+                                document_id,
+                                &url,
+                                if decoded.is_ok() {
+                                    ResourceState::Ready
+                                } else {
+                                    ResourceState::Failed
+                                },
+                            );
+                        }
                     } else {
-                        record(&ledger, document_id, &url, ResourceState::Limited);
+                        if signal.as_ref().is_some_and(|s| s.aborted()) {
+                            forget_resource(&ledger, document_id, &url);
+                        } else {
+                            record(&ledger, document_id, &url, ResourceState::Limited);
+                        }
+                    }
+                    // Cover a navigation racing with the state write above:
+                    // clear() aborts before it clears the ledger, so either
+                    // this removal or clear() wins after the last old write.
+                    if signal.as_ref().is_some_and(|s| s.aborted()) {
+                        forget_resource(&ledger, document_id, &url);
                     }
                     // Blocking work is not aborted when its JoinHandle is
                     // dropped. Always wake after delivery, even if the async
@@ -262,13 +312,11 @@ impl NetProvider for LimitedImageProvider {
             let mut states = ledger
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if states.get(&resource_key(document_id, request.url.as_str()))
-                == Some(&ResourceState::Loading)
-            {
-                states.insert(
-                    resource_key(document_id, request.url.as_str()),
-                    ResourceState::Failed,
-                );
+            let key = resource_key(document_id, request.url.as_str());
+            if request.signal.as_ref().is_some_and(|s| s.aborted()) {
+                states.remove(&key);
+            } else if states.get(&key) == Some(&ResourceState::Loading) {
+                states.insert(key, ResourceState::Failed);
             }
             drop(states);
             waker.wake(document_id);
@@ -423,7 +471,13 @@ fn load_data_image(url: &str) -> Option<Vec<u8>> {
     (bytes.len() <= MAX_EMBEDDED_RESOURCE_BYTES).then_some(bytes)
 }
 
-fn validated_pixel_count(bytes: &[u8]) -> Option<u64> {
+#[derive(Clone, Copy)]
+struct ImageWorkEstimate {
+    pixels: u64,
+    estimated_bytes: u64,
+}
+
+fn validated_image_work(bytes: &[u8]) -> Option<ImageWorkEstimate> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -452,6 +506,30 @@ fn validated_pixel_count(bytes: &[u8]) -> Option<u64> {
             (u64::from(width) * u64::from(MAX_DECODED_DIMENSION)).div_ceil(longest)
                 * (u64::from(height) * u64::from(MAX_DECODED_DIMENSION)).div_ceil(longest)
         })
+        .and_then(|retained_pixels| {
+            // The decoder may hold its source buffer, a resize intermediate,
+            // and RGBA output at once. Charge two RGBA buffers at both source
+            // and target sizes, plus the compressed input. For large JPEGs,
+            // native scaling bounds the decoded source allocation; the
+            // generic raster cap also covers the decoder's fallback limit.
+            let source_pixels = if format == Some(image::ImageFormat::Jpeg) {
+                pixels.min(MAX_IMAGE_PIXELS)
+            } else {
+                pixels
+            };
+            let estimated_bytes = source_pixels
+                .checked_add(retained_pixels)?
+                .checked_mul(8)?
+                .checked_add(u64::try_from(bytes.len()).ok()?)?;
+            Some(ImageWorkEstimate {
+                pixels: retained_pixels,
+                estimated_bytes,
+            })
+        })
+}
+
+fn validated_pixel_count(bytes: &[u8]) -> Option<u64> {
+    validated_image_work(bytes).map(|work| work.pixels)
 }
 
 fn reserve_request(
@@ -597,6 +675,88 @@ mod tests {
         }
     }
 
+    struct HeldDelivery {
+        started: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl NetHandler for HeldDelivery {
+        fn bytes(self: Box<Self>, _: String, _: Bytes) {
+            use std::sync::atomic::Ordering;
+            self.started.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
+    #[test]
+    fn abort_during_delivery_cannot_restore_old_document_state() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let scheduler = scheduler::Scheduler::new(1, 1);
+            let ledger = ResourceLedger::default();
+            let provider = LimitedImageProvider {
+                ledger: ledger.clone(),
+                #[cfg(feature = "remote-content")]
+                allow_remote: false,
+                waker: Arc::new(|_| {}),
+                scheduler: scheduler.clone(),
+                priorities: ResourcePriorities::default(),
+                budgets: Arc::default(),
+            };
+            let started = Arc::new(AtomicBool::new(false));
+            let release = Arc::new(AtomicBool::new(false));
+            let abort = blitz_traits::net::AbortController::default();
+            let signal = abort.signal.clone();
+            provider.fetch(
+                9,
+                Request::get(url::Url::parse(PIXEL).unwrap()).signal(signal),
+                Box::new(HeldDelivery {
+                    started: started.clone(),
+                    release: release.clone(),
+                }),
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !started.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            record(&ledger, 10, "new-document", ResourceState::Ready);
+            abort.abort();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while ledger.lock().unwrap().contains_key(&resource_key(9, PIXEL)) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            release.store(true, Ordering::SeqCst);
+            let next = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                scheduler
+                    .clone()
+                    .acquire(10, "next", true, ResourcePriorities::default()),
+            )
+            .await
+            .unwrap();
+            drop(next);
+            let states = ledger.lock().unwrap();
+            assert!(!states.contains_key(&resource_key(9, PIXEL)));
+            assert_eq!(
+                states.get(&resource_key(10, "new-document")),
+                Some(&ResourceState::Ready)
+            );
+        });
+    }
+
     #[test]
     fn queued_images_keep_their_download_deadline() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -656,6 +816,13 @@ mod tests {
                     .write_to(&mut bytes, format)
                     .unwrap();
                 let budget = validated_pixel_count(bytes.get_ref()).unwrap();
+                let work = validated_image_work(bytes.get_ref()).unwrap();
+                let source_bytes = u64::from(width) * u64::from(height) * 4;
+                let retained_bytes = work.pixels * 4;
+                assert!(
+                    work.estimated_bytes
+                        >= source_bytes + retained_bytes + bytes.get_ref().len() as u64
+                );
                 let decoded = image_decode_limits().decode(bytes.get_ref()).unwrap();
                 let retained = u64::from(decoded.pixel_width) * u64::from(decoded.pixel_height);
                 assert!(
@@ -676,6 +843,8 @@ mod tests {
 
         let budget = validated_pixel_count(bytes.get_ref())
             .expect("a common 12 MP phone JPEG should fit the bounded JPEG path");
+        let work = validated_image_work(bytes.get_ref()).unwrap();
+        assert!(work.estimated_bytes <= 128 * 1024 * 1024);
         let decoded = image_decode_limits().decode(bytes.get_ref()).unwrap();
 
         assert!(decoded.pixel_width <= MAX_DECODED_DIMENSION);
