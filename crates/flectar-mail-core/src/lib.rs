@@ -64,6 +64,26 @@ const MAX_CACHED_HEADER_BYTES: usize = 256 * 1024;
 const SEND_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const SEND_STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+#[cfg(test)]
+mod inline_cid_rewrite_tests {
+    use crate::mime::rewrite_cid_src_with_images;
+    use base64::Engine;
+    use std::collections::HashMap;
+
+    #[test]
+    fn direct_encoding_preserves_existing_data_uri_bytes() {
+        for len in [0, 1, 2, 3, 4, 7, 256, 1024] {
+            let bytes: Vec<u8> = (0..len).map(|index| index as u8).collect();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let map = HashMap::from([("image".to_owned(), ("image/png".to_owned(), bytes))]);
+            assert_eq!(
+                rewrite_cid_src_with_images("<img src='cid:image'>", &map),
+                format!("<img src=\"data:image/png;base64,{encoded}\">")
+            );
+        }
+    }
+}
+
 fn send_start_expired(now: i64, observed_at: i64, not_before: Option<i64>) -> bool {
     let timeout_ms = i64::try_from(SEND_START_TIMEOUT.as_millis()).unwrap_or(i64::MAX);
     now >= not_before.unwrap_or(observed_at).saturating_add(timeout_ms)
@@ -475,6 +495,30 @@ impl Core {
             Ok(n) if n > 0 => tracing::info!("recovered {n} orphaned content fetch(es)"),
             _ => {}
         }
+        // A fresh profile has no snoozes, queued actions, mail actors or
+        // calendar store to poll. Preserve startup work for existing profiles,
+        // and let the scheduler activate after account setup or the first
+        // calendar operation on a new profile.
+        let scheduler_has_existing_work = core.paths.calendar_db_file().exists()
+            || core
+                .db
+                .read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM accounts)
+                             OR EXISTS(SELECT 1 FROM snoozes)
+                             OR EXISTS(SELECT 1 FROM pending_actions)",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )?)
+                })
+                .await?;
+
+        // Recovery and migration can leave both SQLite page caches warm after
+        // scanning a large mailbox. Foreground startup needs only a small page
+        // and badges; close these idle connections before spawning workers so
+        // their recovery working set is not retained throughout the session.
+        // The next read/write reopens its connection with the normal profile.
+        core.db.release_idle_connections().await?;
         // Spawn actors for existing accounts - but only after the Slint UI
         // reports ready (notify_ui_ready). Actors immediately load OAuth
         // tokens from the OS keyring, and on a launch that plays the intro
@@ -484,10 +528,12 @@ impl Core {
         {
             let core = core.clone();
             tokio::spawn(async move {
+                events::sync_diagnostic("startup_wait", None, "waiting_for_ui");
                 tokio::select! {
                     _ = core.ui_ready.notified() => {}
                     _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
                 }
+                events::sync_diagnostic("startup_accounts", None, "loading");
                 let configs = match core
                     .db
                     .read(|conn| repo::accounts::list_configs(conn))
@@ -495,6 +541,7 @@ impl Core {
                 {
                     Ok(c) => c,
                     Err(e) => {
+                        events::sync_diagnostic("startup_accounts", None, e.code());
                         tracing::error!("listing accounts for startup sync: {e}");
                         return;
                     }
@@ -502,6 +549,7 @@ impl Core {
                 for cfg in configs {
                     core.spawn_actor(cfg).await;
                 }
+                events::sync_diagnostic("startup_workers", None, "ready");
                 // Calendar sync tasks for accounts with a connected CalDAV server.
                 if core.paths.calendar_db_file().exists()
                     && let Ok(cal_accounts) = core
@@ -532,6 +580,7 @@ impl Core {
             core.bus.clone(),
             core.handles.clone(),
             core.cal_handles.clone(),
+            scheduler_has_existing_work,
         );
 
         #[cfg(feature = "local-embeddings")]
@@ -552,7 +601,7 @@ impl Core {
         {
             let c = core.clone();
             tokio::spawn(async move {
-                let (marker, threads, auto) =
+                let (marker, has_threads, auto) =
                     c.db.read(|conn| {
                         let s = repo::settings::get(conn)?;
                         let marker: i64 = conn.query_row(
@@ -561,14 +610,19 @@ impl Core {
                             [],
                             |r| r.get(0),
                         )?;
-                        let threads: i64 =
-                            conn.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))?;
-                        Ok((marker, threads, s.auto_labels_enabled))
+                        let has_threads = if marker == 0 && s.auto_labels_enabled {
+                            conn.query_row("SELECT EXISTS(SELECT 1 FROM threads)", [], |r| {
+                                r.get::<_, bool>(0)
+                            })?
+                        } else {
+                            false
+                        };
+                        Ok((marker, has_threads, s.auto_labels_enabled))
                     })
                     .await
-                    .unwrap_or((1, 0, false));
+                    .unwrap_or((1, false, false));
                 if marker == 0 {
-                    if auto && threads > 0 {
+                    if auto && has_threads {
                         match c.reroute_all().await {
                             Ok(n) => tracing::info!("routing backfill resolved {n} threads"),
                             Err(e) => tracing::warn!("routing backfill failed: {e}"),
@@ -655,6 +709,7 @@ impl Core {
     }
 
     async fn spawn_actor(&self, cfg: AccountConfig) {
+        events::sync_diagnostic("spawn_worker", Some(cfg.id), "starting");
         let handle = spawn_account(self.sync_ctx(), cfg);
         self.handles.write().await.insert(handle.account_id, handle);
     }
@@ -1203,6 +1258,7 @@ impl Core {
     /// touches the OS keyring. `notify_one` stores a permit, so the order of
     /// caller vs. waiter never matters.
     pub fn notify_ui_ready(&self) {
+        events::sync_diagnostic("ui_ready", None, "notified");
         self.ui_ready.notify_one();
     }
 
@@ -1799,7 +1855,10 @@ impl Core {
                 };
                 conn.execute(
                     "DELETE FROM draft_attachments
-                     WHERE draft_id IN (SELECT id FROM messages WHERE is_draft = 0)",
+                     WHERE EXISTS (
+                         SELECT 1 FROM messages m
+                         WHERE m.id = draft_attachments.draft_id AND m.is_draft = 0
+                     )",
                     [],
                 )?;
                 let referenced_paths = {
@@ -1969,6 +2028,7 @@ impl Core {
     }
 
     pub async fn sync_now(&self, account_id: Option<i64>) -> Result<()> {
+        events::sync_diagnostic("refresh", account_id, "requested");
         let receivers = {
             let handles = self.handles.read().await;
             match account_id {
@@ -1979,13 +2039,28 @@ impl Core {
                 None => handles.values().map(AccountHandle::sync_now).collect(),
             }
         };
-        for receiver in receivers {
-            let result = tokio::time::timeout(std::time::Duration::from_secs(45), receiver)
-                .await
-                .map_err(|_| CoreError::Other("Inbox sync timed out".into()))?
-                .map_err(|_| CoreError::Other("sync actor stopped".into()))?;
-            result.map_err(CoreError::Other)?;
+        if receivers.is_empty() {
+            events::sync_diagnostic("refresh", account_id, "no_workers");
         }
+        for receiver in receivers {
+            let result =
+                match tokio::time::timeout(std::time::Duration::from_secs(45), receiver).await {
+                    Err(_) => {
+                        events::sync_diagnostic("refresh", account_id, "timeout");
+                        return Err(CoreError::Other("Inbox sync timed out".into()));
+                    }
+                    Ok(Err(_)) => {
+                        events::sync_diagnostic("refresh", account_id, "worker_stopped");
+                        return Err(CoreError::Other("sync actor stopped".into()));
+                    }
+                    Ok(Ok(result)) => result,
+                };
+            if let Err(error) = result {
+                events::sync_diagnostic("refresh", account_id, "worker_error");
+                return Err(CoreError::Other(error));
+            }
+        }
+        events::sync_diagnostic("refresh", account_id, "complete");
         Ok(())
     }
 
@@ -2486,22 +2561,24 @@ impl Core {
             return html;
         }
         // Extraction + base64 of (possibly large) image parts is CPU-bound.
-        let fallback = html.clone();
-        tokio::task::spawn_blocking(move || {
-            use base64::Engine;
+        let fallback = Arc::new(html);
+        let worker_html = Arc::clone(&fallback);
+        let rewritten = tokio::task::spawn_blocking(move || {
             let mut map = std::collections::HashMap::new();
             for (content_id, mime, bytes) in fetched {
-                let mime = mime.unwrap_or_else(|| "application/octet-stream".to_string());
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 map.insert(
                     crate::mime::normalize_cid(&content_id),
-                    format!("data:{mime};base64,{b64}"),
+                    (
+                        mime.unwrap_or_else(|| "application/octet-stream".to_string()),
+                        bytes,
+                    ),
                 );
             }
-            crate::mime::rewrite_cid_src(&html, &map)
+            crate::mime::rewrite_cid_src_with_images(&worker_html, &map)
         })
-        .await
-        .unwrap_or(fallback)
+        .await;
+        rewritten
+            .unwrap_or_else(|_| Arc::try_unwrap(fallback).unwrap_or_else(|html| (*html).clone()))
     }
 
     /// Batch variant of `inline_cid_images` for the thread-open path: one DB
@@ -2639,31 +2716,46 @@ impl Core {
             return out;
         }
 
+        // Only messages with fetched images need rewriting. Move the others
+        // straight to the result so their HTML is never copied for this worker.
+        let fetched_ids: HashSet<i64> = fetched.iter().map(|(id, _, _, _)| *id).collect();
+        let mut to_rewrite = Vec::new();
+        for (id, html) in need {
+            if fetched_ids.contains(&id) {
+                to_rewrite.push((id, html));
+            } else {
+                out.insert(id, html);
+            }
+        }
+
         // Extraction + base64 of (possibly large) image parts is CPU-bound.
-        let fallback = need.clone();
+        let fallback = Arc::new(to_rewrite);
+        let worker_need = Arc::clone(&fallback);
         let rewritten = tokio::task::spawn_blocking(move || {
-            use base64::Engine;
-            let mut maps: HashMap<i64, HashMap<String, String>> = HashMap::new();
+            let mut maps: HashMap<i64, HashMap<String, (String, Vec<u8>)>> = HashMap::new();
             for (message_id, content_id, mime, bytes) in fetched {
-                let mime = mime.unwrap_or_else(|| "application/octet-stream".to_string());
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 maps.entry(message_id).or_default().insert(
                     crate::mime::normalize_cid(&content_id),
-                    format!("data:{mime};base64,{b64}"),
+                    (
+                        mime.unwrap_or_else(|| "application/octet-stream".to_string()),
+                        bytes,
+                    ),
                 );
             }
-            need.into_iter()
-                .map(|(id, html)| match maps.get(&id) {
+            worker_need
+                .iter()
+                .map(|(id, html)| match maps.get(id) {
                     Some(map) => {
-                        let html = crate::mime::rewrite_cid_src(&html, map);
-                        (id, html)
+                        let html = crate::mime::rewrite_cid_src_with_images(html, map);
+                        (*id, html)
                     }
-                    None => (id, html),
+                    None => (*id, html.clone()),
                 })
                 .collect::<Vec<_>>()
         })
-        .await
-        .unwrap_or(fallback);
+        .await;
+        let rewritten = rewritten
+            .unwrap_or_else(|_| Arc::try_unwrap(fallback).unwrap_or_else(|html| (*html).clone()));
         out.extend(rewritten);
         out
     }
@@ -8372,8 +8464,86 @@ mod attachment_ext_tests {
 }
 
 #[cfg(test)]
+mod startup_connection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn startup_releases_recovery_connections_before_foreground_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::for_tests(temp.path());
+        let db = Db::open(&paths.db_file()).unwrap();
+        db.write(|conn| {
+            conn.execute(
+                "INSERT INTO route_cache(sender_domain, route_key) VALUES('__routing_backfill__', '1')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db.release_idle_connections().await.unwrap();
+        drop(db);
+        let core = Core::start_mail_ui(paths).await.unwrap();
+
+        assert!(
+            core.db
+                .cache_usage()
+                .await
+                .unwrap()
+                .iter()
+                .all(|connection| connection.role != "writer")
+        );
+        core.get_settings().await.unwrap();
+        let usage = core.db.cache_usage().await.unwrap();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].role, "reader");
+    }
+}
+
+#[cfg(test)]
 mod draft_staging_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cleanup_scans_staged_attachments_and_keeps_live_draft_references() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        let (sent_id, draft_id) = core
+            .db
+            .write(|conn| {
+                db::testutil::seed_account(conn);
+                let (_, sent_id) = db::testutil::seed_message(conn, "me@test.dev", "sent", false);
+                let (_, draft_id) = db::testutil::seed_message(conn, "me@test.dev", "draft", false);
+                conn.execute("UPDATE messages SET is_draft = 1 WHERE id = ?1", [draft_id])?;
+                for (message_id, name) in [(sent_id, "sent"), (draft_id, "draft")] {
+                    conn.execute(
+                        "INSERT INTO draft_attachments (draft_id, file_path, filename)
+                         VALUES (?1, ?2, ?2)",
+                        rusqlite::params![message_id, name],
+                    )?;
+                }
+                Ok((sent_id, draft_id))
+            })
+            .await
+            .unwrap();
+
+        core.cleanup_orphaned_draft_files().await.unwrap();
+        let retained = core
+            .db
+            .read(|conn| {
+                let mut statement =
+                    conn.prepare("SELECT draft_id FROM draft_attachments ORDER BY draft_id")?;
+                Ok(statement
+                    .query_map([], |row| row.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await
+            .unwrap();
+        assert_ne!(sent_id, draft_id);
+        assert_eq!(retained, vec![draft_id]);
+    }
 
     fn draft_args(
         draft_id: Option<i64>,

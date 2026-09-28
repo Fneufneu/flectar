@@ -7,6 +7,31 @@ use crate::models::{Label, MailboxBadgeCounts, SplitRule, UnreadCounts, roles};
 use rusqlite::Connection;
 use std::collections::HashMap;
 
+const INBOX_BADGE_SQL: &str = "SELECT t.account_id, COUNT(*)
+         FROM threads t
+         LEFT JOIN snoozes s ON s.thread_id = t.id
+         WHERE t.unread_count > 0
+           AND s.thread_id IS NULL
+           AND (EXISTS (
+                SELECT 1 FROM messages m JOIN folders f ON f.id = m.folder_id
+                WHERE m.thread_id = t.id AND f.role = 'inbox'
+           ) OR EXISTS (
+                SELECT 1 FROM messages m
+                JOIN accounts ma ON ma.id = m.account_id AND ma.provider = 'gmail'
+                JOIN message_folders mf ON mf.message_id = m.id
+                JOIN folders f ON f.id = mf.folder_id
+                WHERE m.thread_id = t.id AND f.role = 'inbox'
+           ))
+         GROUP BY t.account_id";
+
+/// Query-plan details for the inbox badge path used by `mailbox_badge_counts`.
+pub fn inbox_badge_query_plan(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {INBOX_BADGE_SQL}"))?;
+    Ok(stmt
+        .query_map([], |row| row.get(3))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Composable COUNT(*) query over threads (+ snoozes join, like SUMMARY_SELECT).
 struct Q {
     clauses: Vec<String>,
@@ -226,24 +251,7 @@ pub fn mailbox_badge_counts(conn: &Connection) -> Result<Vec<MailboxBadgeCounts>
 
     // The inbox predicate mirrors `Q::inbox`, but grouping by account returns
     // every native sidebar section without repeating the scan per account.
-    let mut inbox = conn.prepare(
-        "SELECT t.account_id, COUNT(*)
-         FROM threads t
-         LEFT JOIN snoozes s ON s.thread_id = t.id
-         WHERE t.unread_count > 0
-           AND s.thread_id IS NULL
-           AND (EXISTS (
-                SELECT 1 FROM messages m JOIN folders f ON f.id = m.folder_id
-                WHERE m.thread_id = t.id AND f.role = 'inbox'
-           ) OR EXISTS (
-                SELECT 1 FROM messages m
-                JOIN accounts ma ON ma.id = m.account_id AND ma.provider = 'gmail'
-                JOIN message_folders mf ON mf.message_id = m.id
-                JOIN folders f ON f.id = mf.folder_id
-                WHERE m.thread_id = t.id AND f.role = 'inbox'
-           ))
-         GROUP BY t.account_id",
-    )?;
+    let mut inbox = conn.prepare(INBOX_BADGE_SQL)?;
     for row in inbox.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))? {
         let (account_id, value) = row?;
         if let Some(index) = positions.get(&account_id) {

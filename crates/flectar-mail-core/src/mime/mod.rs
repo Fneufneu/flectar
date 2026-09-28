@@ -1263,9 +1263,59 @@ pub fn rewrite_cid_src(html: &str, map: &std::collections::HashMap<String, Strin
         .into_owned()
 }
 
+/// Write cached CID image bytes directly into the final HTML. This avoids a
+/// second set of large base64 strings while the rewritten document is built.
+pub fn rewrite_cid_src_with_images(
+    html: &str,
+    map: &std::collections::HashMap<String, (String, Vec<u8>)>,
+) -> String {
+    use base64::Engine;
+
+    let image_for = |caps: &regex::Captures| {
+        let cid = caps.get(1).or_else(|| caps.get(2))?.as_str();
+        map.get(cid.trim().trim_matches(|c| c == '<' || c == '>'))
+    };
+    let mut capacity = html.len();
+    let mut found = false;
+    for caps in CID_SRC.captures_iter(html) {
+        let Some((mime, bytes)) = image_for(&caps) else {
+            continue;
+        };
+        found = true;
+        let encoded_len = base64::encoded_len(bytes.len(), true)
+            .expect("bounded inline CID image cannot overflow base64 length");
+        let replacement_len = "src=\"data:;base64,\"".len() + mime.len() + encoded_len;
+        capacity = capacity
+            .checked_add(replacement_len)
+            .and_then(|size| size.checked_sub(caps.get(0).unwrap().len()))
+            .expect("rewritten CID HTML length overflow");
+    }
+    if !found {
+        return html.to_owned();
+    }
+    let mut rewritten = String::with_capacity(capacity);
+    let mut offset = 0;
+    for caps in CID_SRC.captures_iter(html) {
+        let whole = caps.get(0).unwrap();
+        rewritten.push_str(&html[offset..whole.start()]);
+        if let Some((mime, bytes)) = image_for(&caps) {
+            rewritten.push_str("src=\"data:");
+            rewritten.push_str(mime);
+            rewritten.push_str(";base64,");
+            base64::engine::general_purpose::STANDARD.encode_string(bytes, &mut rewritten);
+            rewritten.push('"');
+        } else {
+            rewritten.push_str(whole.as_str());
+        }
+        offset = whole.end();
+    }
+    rewritten.push_str(&html[offset..]);
+    rewritten
+}
+
 #[cfg(test)]
 mod cid_tests {
-    use super::{normalize_cid, referenced_cids, rewrite_cid_src};
+    use super::{normalize_cid, referenced_cids, rewrite_cid_src, rewrite_cid_src_with_images};
     use std::collections::HashMap;
 
     #[test]
@@ -1281,6 +1331,27 @@ mod cid_tests {
         assert!(
             out.contains("cid:missing@y"),
             "unknown cid untouched: {out}"
+        );
+    }
+
+    #[test]
+    fn byte_rewrite_matches_string_rewrite_with_repeated_and_unknown_cids() {
+        use base64::Engine;
+
+        let mut bytes = HashMap::new();
+        bytes.insert(
+            "logo@x".to_string(),
+            ("image/png".to_string(), vec![0, 1, 2, 255]),
+        );
+        let uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode([0, 1, 2, 255])
+        );
+        let strings = HashMap::from([("logo@x".to_string(), uri)]);
+        let html = "é<img src='cid:<logo@x>'><img SRC=\"cid:logo@x\"><img src='cid:unknown'>尾";
+        assert_eq!(
+            rewrite_cid_src_with_images(html, &bytes),
+            rewrite_cid_src(html, &strings)
         );
     }
 
@@ -1918,6 +1989,27 @@ fn extract_data_uri_images(html: &str) -> (String, Vec<InlineImage>) {
 
 /// Build a raw RFC 5322 message. Returns (message_id, raw_bytes).
 pub fn build_message(out: &OutgoingMessage) -> Result<(String, Vec<u8>)> {
+    build_message_with_attachments(
+        out,
+        out.attachments.iter().map(|att| OutgoingAttachment {
+            filename: att.filename.clone(),
+            mime_type: att.mime_type.clone(),
+            bytes: att.bytes.clone(),
+        }),
+    )
+}
+
+/// Build a message while transferring attachment buffers into the MIME builder.
+/// Send paths should use this when the attachments will not be needed again.
+pub fn build_message_owned(mut out: OutgoingMessage<'_>) -> Result<(String, Vec<u8>)> {
+    let attachments = std::mem::take(&mut out.attachments);
+    build_message_with_attachments(&out, attachments)
+}
+
+fn build_message_with_attachments(
+    out: &OutgoingMessage<'_>,
+    attachments: impl IntoIterator<Item = OutgoingAttachment>,
+) -> Result<(String, Vec<u8>)> {
     let stable_id = out
         .message_id
         .map(str::trim)
@@ -1978,12 +2070,8 @@ pub fn build_message(out: &OutgoingMessage) -> Result<(String, Vec<u8>)> {
     if !bcc_mb.is_empty() {
         builder = builder.bcc(bcc_mb);
     }
-    for att in &out.attachments {
-        builder = builder.attachment(
-            att.mime_type.clone(),
-            att.filename.clone(),
-            att.bytes.clone(),
-        );
+    for att in attachments {
+        builder = builder.attachment(att.mime_type, att.filename, att.bytes);
     }
     if let Some(irt) = out.in_reply_to {
         builder = builder.in_reply_to(irt.trim_matches(['<', '>']).to_string());
@@ -2343,6 +2431,27 @@ mod tests {
         let (generated, raw) = build_message(&message).unwrap();
         assert_ne!(generated, "<bad\r\nBcc: injected@example.com>");
         assert!(!String::from_utf8_lossy(&raw).contains("Bcc: injected@example.com"));
+    }
+
+    #[test]
+    fn owned_attachment_builder_preserves_attachment_content() {
+        let mut message = outgoing("body", None);
+        message.message_id = Some("stable.attachment@example.com");
+        message.attachments.push(OutgoingAttachment {
+            filename: "binary.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            bytes: vec![0, 1, 2, 127, 128, 255],
+        });
+        let (borrowed_id, borrowed) = build_message(&message).unwrap();
+        let (owned_id, owned) = build_message_owned(message).unwrap();
+        assert_eq!(borrowed_id, owned_id);
+        for raw in [&borrowed, &owned] {
+            let parsed = mail_parser::MessageParser::default().parse(raw).unwrap();
+            let parts: Vec<_> = parsed.attachments().collect();
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0].attachment_name(), Some("binary.bin"));
+            assert_eq!(parts[0].contents(), &[0, 1, 2, 127, 128, 255]);
+        }
     }
 
     #[test]

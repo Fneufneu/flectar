@@ -1553,21 +1553,17 @@ async fn build_draft_message(
         message_id_domain: domain,
         attachments: outgoing_attachments,
     };
-    let (message_id, raw) = crate::mime::build_message(&outgoing)?;
-    let raw = crate::mail_security::protect_draft(
-        &ctx.db,
-        config.id,
-        draft_id,
-        raw,
-        outgoing
-            .to
-            .iter()
-            .chain(outgoing.cc)
-            .chain(outgoing.bcc)
-            .cloned()
-            .collect(),
-    )
-    .await?;
+    let security_recipients = outgoing
+        .to
+        .iter()
+        .chain(outgoing.cc)
+        .chain(outgoing.bcc)
+        .cloned()
+        .collect();
+    let (message_id, raw) = crate::mime::build_message_owned(outgoing)?;
+    let raw =
+        crate::mail_security::protect_draft(&ctx.db, config.id, draft_id, raw, security_recipients)
+            .await?;
     if raw.len() > max_upload {
         return Err(CoreError::Jmap(format!(
             "message exceeds the server or local upload limit of {} MiB",

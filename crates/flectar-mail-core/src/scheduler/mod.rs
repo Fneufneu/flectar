@@ -21,11 +21,23 @@ pub fn spawn(
     bus: EventBus,
     handles: Arc<RwLock<HashMap<i64, AccountHandle>>>,
     cal_handles: Arc<RwLock<HashMap<i64, CalTaskHandle>>>,
+    has_existing_work: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut nudged_until: i64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(TICK_SECS)).await;
+            // An empty welcome has nothing timed to dispatch. Waiting here
+            // keeps the just-released SQLite reader cache closed. New mail
+            // account actors and an opened calendar store activate the same
+            // scheduler without creating another task.
+            if !has_existing_work
+                && !calendar_db.is_open()
+                && handles.read().await.is_empty()
+                && cal_handles.read().await.is_empty()
+            {
+                continue;
+            }
             let now = now_ms();
 
             // 1. Wake snoozed threads.

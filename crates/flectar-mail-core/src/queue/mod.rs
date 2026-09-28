@@ -768,20 +768,18 @@ async fn send_action(
         message_id_domain: &domain,
         attachments,
     };
-    let (msg_id, raw) = crate::mime::build_message(&out)?;
-    let raw = crate::mail_security::protect_draft(
-        &ctx.db,
-        config.id,
-        draft_id,
-        raw,
-        out.to
-            .iter()
-            .chain(out.cc)
-            .chain(out.bcc)
-            .cloned()
-            .collect(),
-    )
-    .await?;
+    let attachment_count = out.attachments.len();
+    let security_recipients = out
+        .to
+        .iter()
+        .chain(out.cc)
+        .chain(out.bcc)
+        .cloned()
+        .collect();
+    let (msg_id, raw) = crate::mime::build_message_owned(out)?;
+    let raw =
+        crate::mail_security::protect_draft(&ctx.db, config.id, draft_id, raw, security_recipients)
+            .await?;
     // Persist the exact protected MIME before SMTP. It gives retries a stable
     // Message-ID and lets Sent filing run independently after delivery without
     // retaining composer attachments or rebuilding encrypted content.
@@ -805,7 +803,7 @@ async fn send_action(
         draft_id,
         message_id = %msg_id,
         bytes = raw.len(),
-        attachments = out.attachments.len(),
+        attachments = attachment_count,
         to = detail.to.len(),
         cc = detail.cc.len(),
         bcc = bcc.len(),

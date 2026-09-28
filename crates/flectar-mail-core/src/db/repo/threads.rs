@@ -405,12 +405,7 @@ fn build_filter(
 }
 
 pub fn list(conn: &Connection, args: &ListArgs) -> Result<ThreadPage> {
-    let (where_sql, bind) = build_filter(args, true);
-    let sql = format!(
-        "{SUMMARY_SELECT} {where_sql}
-         ORDER BY t.last_message_at DESC, t.id DESC LIMIT {}",
-        args.limit + 1
-    );
+    let (sql, bind) = list_sql(args);
 
     let mut stmt = conn.prepare(&sql)?;
     let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
@@ -431,6 +426,28 @@ pub fn list(conn: &Connection, args: &ListArgs) -> Result<ThreadPage> {
         threads,
         next_cursor,
     })
+}
+
+fn list_sql(args: &ListArgs) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let (where_sql, bind) = build_filter(args, true);
+    (
+        format!(
+            "{SUMMARY_SELECT} {where_sql}
+             ORDER BY t.last_message_at DESC, t.id DESC LIMIT {}",
+            args.limit + 1
+        ),
+        bind,
+    )
+}
+
+/// Query-plan details for the exact list shape, including its cursor/filter.
+pub fn list_query_plan(conn: &Connection, args: &ListArgs) -> Result<Vec<String>> {
+    let (sql, bind) = list_sql(args);
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+    Ok(stmt
+        .query_map(params_ref.as_slice(), |row| row.get(3))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Count the exact result set represented by `ListArgs` without materializing

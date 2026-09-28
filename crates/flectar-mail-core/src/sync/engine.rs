@@ -39,6 +39,9 @@ const PRIORITY_BODY_FETCH_CHUNK: usize = 25;
 /// network round trip and permits hundreds of small messages per second on a
 /// fast server.
 const BODY_FETCH_CHUNK: usize = 200;
+/// Each round queues at most this many missing IDs across the account,
+/// regardless of mailbox size. Older rows are reached through keyset pages.
+const BODY_PLAN_PAGE: i64 = 2 * BODY_FETCH_CHUNK as i64;
 /// Bound one selective response independently of message count. Two workers at
 /// this ceiling use modest memory while still allowing high-throughput bursts.
 const MAX_SELECTIVE_BATCH_BYTES: u64 = 8 * 1024 * 1024;
@@ -732,6 +735,7 @@ async fn run_actor(
     hist_tx: mpsc::Sender<()>,
 ) {
     let account_id = config.id;
+    crate::events::sync_diagnostic("imap_worker", Some(account_id), "started");
     tracing::debug!(account_id, "sync actor started");
     let mut session: Option<Session> = None;
     // Whether the current connection supports IMAP IDLE (push). Re-probed on
@@ -770,6 +774,7 @@ async fn run_actor(
                     set_state(&ctx, account_id, "syncing").await;
                 }
                 Err(e @ (CoreError::NeedsReauth | CoreError::Auth(_))) => {
+                    crate::events::sync_diagnostic("imap_connect", Some(account_id), e.code());
                     tracing::warn!(
                         account_id,
                         imap_host = %config.imap_host,
@@ -790,6 +795,7 @@ async fn run_actor(
                     }
                 }
                 Err(e) => {
+                    crate::events::sync_diagnostic("imap_connect", Some(account_id), e.code());
                     tracing::warn!(account_id, "imap connect failed: {e}");
                     ctx.bus.emit(CoreEvent::NetworkState { online: false });
                     let message = e.to_string();
@@ -1222,7 +1228,9 @@ pub(super) async fn emit_sync_status(ctx: &SyncCtx, account_id: i64) {
 }
 
 async fn connect(ctx: &SyncCtx, config: &AccountConfig) -> Result<Session> {
+    crate::events::sync_diagnostic("imap_credentials", Some(config.id), "loading");
     let creds = imap_credentials(ctx, config).await?;
+    crate::events::sync_diagnostic("imap_connect", Some(config.id), "connecting");
     match imap::connect_with_settings(
         &config.imap_host,
         config.imap_port,
@@ -2754,15 +2762,15 @@ async fn drain_missing_bodies(
     config: &AccountConfig,
     settings_rx: &mut watch::Receiver<crate::models::AccountSettings>,
 ) -> Result<()> {
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let account_id = config.id;
-    // Message ids attempted this drain whose bodies the server didn't return
-    // (expunged mid-sync): skipped for the rest of the drain so it terminates;
-    // expunge reconciliation removes the rows.
-    let skip: Arc<std::sync::Mutex<HashSet<i64>>> = Arc::default();
     let mut did_work = false;
+    let mut cursors: HashMap<i64, (i64, i64)> = HashMap::new();
+    let mut exhausted = HashSet::new();
+    let mut pass_persisted = 0u64;
+    let mut pass_had_chunks = false;
 
     loop {
         let mail_history = settings_rx.borrow_and_update().mail_history;
@@ -2783,20 +2791,33 @@ async fn drain_missing_bodies(
             if folder.role.as_deref() == Some(roles::ALL) && config.provider != Provider::Gmail {
                 continue;
             }
+            if exhausted.contains(&folder.id) {
+                continue;
+            }
             let fid = folder.id;
+            let cursor = cursors.get(&fid).copied();
             let missing = ctx
                 .db
                 .read(move |conn| {
-                    repo::messages::missing_bodies_since(conn, fid, i64::MAX, cutoff_ms)
+                    repo::messages::missing_bodies_page_since(
+                        conn,
+                        fid,
+                        BODY_PLAN_PAGE,
+                        cutoff_ms,
+                        cursor,
+                    )
                 })
                 .await?;
-            let missing: Vec<(i64, i64)> = {
-                let skip = skip.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                missing
-                    .into_iter()
-                    .filter(|(mid, _)| !skip.contains(mid))
-                    .collect()
-            };
+            if let Some(&(id, _, date)) = missing.last() {
+                cursors.insert(fid, (date, id));
+            }
+            if missing.len() < BODY_PLAN_PAGE as usize {
+                exhausted.insert(fid);
+            }
+            let missing: Vec<(i64, i64)> = missing
+                .into_iter()
+                .map(|(mid, uid, _)| (mid, uid))
+                .collect();
             for chunk in missing.chunks(BODY_FETCH_CHUNK) {
                 chunks.push_back(BodyChunk {
                     folder_id: folder.id,
@@ -2805,15 +2826,33 @@ async fn drain_missing_bodies(
                     items: chunk.to_vec(),
                 });
             }
+            if !chunks.is_empty() {
+                // One page at a time across the account, including folders
+                // that would otherwise accumulate behind an active inbox.
+                break;
+            }
         }
 
         if chunks.is_empty() {
+            if pass_persisted > 0 {
+                cursors.clear();
+                exhausted.clear();
+                pass_persisted = 0;
+                pass_had_chunks = false;
+                continue;
+            }
+            if pass_had_chunks {
+                return Err(CoreError::Imap(
+                    "body backfill made no progress; will retry".into(),
+                ));
+            }
             if did_work {
                 tracing::info!(account_id, "body backfill: drained");
             }
             return Ok(());
         }
         did_work = true;
+        pass_had_chunks = true;
         tracing::debug!(
             account_id,
             chunks = chunks.len(),
@@ -2839,7 +2878,6 @@ async fn drain_missing_bodies(
                 ctx.clone(),
                 config.clone(),
                 queue.clone(),
-                skip.clone(),
                 persisted.clone(),
                 settings_rx.clone(),
             )));
@@ -2865,12 +2903,10 @@ async fn drain_missing_bodies(
         if let Some(error) = worker_error {
             return Err(error);
         }
-        if persisted.load(Ordering::Relaxed) == 0 {
-            return Err(CoreError::Imap(
-                "body backfill made no progress; will retry".into(),
-            ));
-        }
-        // Re-scan: headers that landed while this round ran get picked up too.
+        let round_persisted = persisted.load(Ordering::Relaxed);
+        pass_persisted += round_persisted;
+        // Continue from each folder's cursor, then re-scan after a productive
+        // full pass so headers that landed meanwhile are picked up too.
     }
 }
 
@@ -2881,7 +2917,6 @@ async fn body_worker(
     ctx: SyncCtx,
     config: AccountConfig,
     queue: Arc<tokio::sync::Mutex<std::collections::VecDeque<BodyChunk>>>,
-    skip: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
     persisted: Arc<std::sync::atomic::AtomicU64>,
     settings_rx: watch::Receiver<crate::models::AccountSettings>,
 ) -> Result<()> {
@@ -2901,7 +2936,7 @@ async fn body_worker(
         let chunk = queue.lock().await.pop_front();
         let Some(chunk) = chunk else { break };
         let chunk_started = std::time::Instant::now();
-        match fetch_body_chunk(&ctx, &config, &mut session, &mut selected, &chunk, &skip).await {
+        match fetch_body_chunk(&ctx, &config, &mut session, &mut selected, &chunk).await {
             Ok(n) => {
                 persisted.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                 if n > 0 {
@@ -2973,9 +3008,6 @@ async fn body_worker(
                         .map(|(message_id, _)| (*message_id, error.to_string()))
                         .collect();
                     record_content_failure_details(&ctx, failures).await?;
-                    skip.lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .extend(retry.items.iter().map(|(message_id, _)| *message_id));
                     drop(session);
                     if queue.lock().await.is_empty() {
                         return Ok(());
@@ -3005,15 +3037,14 @@ async fn body_worker(
 }
 
 /// Fetch one chunk's bodies over `session` and persist them. Returns how many
-/// bodies were cached. UIDs the server didn't return have vanished; they go
-/// into `skip` so the drain terminates (expunge reconciliation drops the rows).
+/// bodies were cached. The keyset cursor advances past UIDs the server omits;
+/// durable content failures postpone retry until the next backstop cycle.
 async fn fetch_body_chunk(
     ctx: &SyncCtx,
     config: &AccountConfig,
     session: &mut Session,
     selected: &mut Option<(String, Option<i64>)>,
     chunk: &BodyChunk,
-    skip: &std::sync::Mutex<std::collections::HashSet<i64>>,
 ) -> std::result::Result<u64, BodyChunkError> {
     // The main actor can rename/reset a folder while this background queue is
     // waiting. Do not use a stale folder snapshot, especially across a
@@ -3033,9 +3064,6 @@ async fn fetch_body_chunk(
         .await
         .map_err(BodyChunkError::Fatal)?;
     if !folder_is_current {
-        skip.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(chunk.items.iter().map(|(message_id, _)| *message_id));
         return Ok(0);
     }
 
@@ -3054,9 +3082,6 @@ async fn fetch_body_chunk(
                 selected_uidvalidity = ?mailbox.uid_validity,
                 "body backfill: stale folder UIDVALIDITY; skipping queued rows"
             );
-            skip.lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .extend(chunk.items.iter().map(|(message_id, _)| *message_id));
             return Ok(0);
         }
         *selected = Some((chunk.folder_name.clone(), mailbox.uid_validity));
@@ -3081,11 +3106,6 @@ async fn fetch_body_chunk(
             .push(item);
     }
 
-    for (message_id, _) in &failures {
-        skip.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(*message_id);
-    }
     record_content_failure_details(ctx, failures)
         .await
         .map_err(BodyChunkError::Fatal)?;
@@ -3148,11 +3168,6 @@ async fn fetch_body_chunk(
                     "content decode task failed: {error}"
                 )))
             })?;
-            for (message_id, _) in &batch_failures {
-                skip.lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(*message_id);
-            }
             record_content_failure_details(ctx, batch_failures)
                 .await
                 .map_err(BodyChunkError::Fatal)?;

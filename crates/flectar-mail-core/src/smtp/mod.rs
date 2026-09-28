@@ -329,7 +329,7 @@ pub async fn send_raw(
         recipients = recipients.len(),
         "smtp send_raw: connecting to relay",
     );
-    let message = crate::mail_security::without_bcc(raw)?;
+    let message = crate::mail_security::without_bcc_for_delivery(raw)?;
     if cfg.settings.connection.trusted_certificate_pem.is_empty() {
         build_transport(cfg, auth)?
             .send_raw(&envelope, &message)

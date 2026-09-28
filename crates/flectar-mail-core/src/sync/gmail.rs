@@ -2752,21 +2752,17 @@ async fn prepare_draft(
         message_id_domain: &domain,
         attachments,
     };
-    let (message_id, raw) = crate::mime::build_message(&outgoing)?;
-    let raw = crate::mail_security::protect_draft(
-        &ctx.db,
-        config.id,
-        draft_id,
-        raw,
-        outgoing
-            .to
-            .iter()
-            .chain(outgoing.cc)
-            .chain(outgoing.bcc)
-            .cloned()
-            .collect(),
-    )
-    .await?;
+    let security_recipients = outgoing
+        .to
+        .iter()
+        .chain(outgoing.cc)
+        .chain(outgoing.bcc)
+        .cloned()
+        .collect();
+    let (message_id, raw) = crate::mime::build_message_owned(outgoing)?;
+    let raw =
+        crate::mail_security::protect_draft(&ctx.db, config.id, draft_id, raw, security_recipients)
+            .await?;
     let bare_message_id = message_id.trim_matches(['<', '>']).to_owned();
     if stored_message_id.as_deref() != Some(bare_message_id.as_str()) {
         let stable_id = bare_message_id.clone();
@@ -3747,6 +3743,7 @@ async fn run_actor(
             }
             Err(error) => {
                 tracing::warn!(account_id, %error, "Gmail sync cycle failed");
+                crate::events::sync_diagnostic("gmail_cycle", Some(account_id), error.code());
                 ctx.bus.emit(CoreEvent::NetworkState { online: false });
                 let message = error.to_string();
                 set_state_error(&ctx, account_id, "offline", &message).await;

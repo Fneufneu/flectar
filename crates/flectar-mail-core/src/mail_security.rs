@@ -494,6 +494,9 @@ pub async fn protect_draft(
         } else { config.settings.security };
         Ok((policy, config.email))
     }).await?;
+    if !policy.enabled() {
+        return Ok(raw);
+    }
     Gpg::default()
         .protect(&raw, &policy, &sender, &recipients)
         .await
@@ -544,6 +547,23 @@ pub fn without_bcc(raw: &[u8]) -> Result<Vec<u8>> {
     result.extend(b"\r\n");
     result.extend(&raw[at + 4..]);
     Ok(result)
+}
+
+/// Borrow the original MIME when no Bcc header needs removal before SMTP.
+pub(crate) fn without_bcc_for_delivery(raw: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
+    let at = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| error("Malformed message"))?;
+    if raw[..at].split(|b| *b == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line.get(..4)
+            .is_some_and(|v| v.eq_ignore_ascii_case(b"bcc:"))
+    }) {
+        Ok(std::borrow::Cow::Owned(without_bcc(raw)?))
+    } else {
+        Ok(std::borrow::Cow::Borrowed(raw))
+    }
 }
 
 pub struct OpenedMessage {
@@ -875,6 +895,19 @@ mod tests {
         let (header, entity) = split_entity(raw).unwrap();
         assert!(!String::from_utf8_lossy(&header).contains("Content-Type"));
         assert!(entity.starts_with(b"Content-Type: text/plain\r\n\r\n"));
+    }
+
+    #[test]
+    fn smtp_borrows_mime_without_bcc_and_strips_bcc_when_present() {
+        let plain = b"From: a@example.org\r\nSubject: x\r\n\r\nBody\r\n";
+        assert!(matches!(
+            without_bcc_for_delivery(plain).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let hidden = b"From: a@example.org\r\nBcc: hidden@example.org\r\n\r\nBody\r\n";
+        let stripped = without_bcc_for_delivery(hidden).unwrap();
+        assert!(matches!(&stripped, std::borrow::Cow::Owned(_)));
+        assert!(!stripped.windows(4).any(|window| window == b"Bcc:"));
     }
     #[test]
     fn rejects_revoked_expired_wrong_identity_and_untrusted_bindings() {

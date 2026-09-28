@@ -23,6 +23,22 @@ type Job = Box<dyn FnOnce(Result<&mut Connection>) + Send + 'static>;
 enum Command {
     Run(Job),
     Release(oneshot::Sender<()>),
+    Inspect(oneshot::Sender<Result<Option<SqliteCacheUsage>>>),
+}
+
+/// SQLite's allocated page-cache bytes for one live connection. This is not
+/// resident memory: mmap pages and allocator retention must be measured apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteCacheUsage {
+    pub cache_bytes: i64,
+    pub cache_limit_kib: i64,
+    pub mmap_limit_bytes: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DbConnectionCacheUsage {
+    pub role: &'static str,
+    pub usage: SqliteCacheUsage,
 }
 
 struct LazyStore {
@@ -37,12 +53,27 @@ struct LazyStore {
 // small enough to bound queued job count. Captured payloads and producers
 // awaiting admission need their own byte budgets.
 const JOB_QUEUE_CAPACITY: usize = 128;
+const MAIL_READER_CACHE_KIB: i64 = 2_048;
+const MAIL_READER_MMAP_BYTES: i64 = 2_097_152;
 
 #[derive(Clone, Copy)]
 enum StoreKind {
     Mail,
     Calendar,
     Files,
+}
+
+fn configure_query_connection(conn: &Connection, kind: StoreKind) -> Result<()> {
+    conn.pragma_update(None, "query_only", "ON")?;
+    if matches!(kind, StoreKind::Mail) {
+        // Populated FTS search can fill the reader's old 8 MiB page cache.
+        // The writer keeps that capacity for sync transactions, while the
+        // reader uses a smaller private cache and mapped working set for
+        // list, badges, and search.
+        conn.pragma_update(None, "cache_size", -MAIL_READER_CACHE_KIB)?;
+        conn.pragma_update(None, "mmap_size", MAIL_READER_MMAP_BYTES)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -61,7 +92,7 @@ fn spawn_conn_thread(
     let (tx, mut rx) = mpsc::channel::<Command>(JOB_QUEUE_CAPACITY);
     let conn = open_connection(&path, kind)?;
     if query_only {
-        conn.pragma_update(None, "query_only", "ON")?;
+        configure_query_connection(&conn, kind)?;
     }
     std::thread::Builder::new()
         .name(format!("flectar-mail-db-{name}"))
@@ -75,12 +106,15 @@ fn spawn_conn_thread(
                         connection.take();
                         let _ = done.send(());
                     }
+                    Command::Inspect(reply) => {
+                        let _ = reply.send(connection.as_ref().map(sqlite_cache_usage).transpose());
+                    }
                     Command::Run(job) => {
                         let result = (|| {
                             if connection.is_none() {
                                 let conn = open_connection(&path, kind)?;
                                 if query_only {
-                                    conn.pragma_update(None, "query_only", "ON")?;
+                                    configure_query_connection(&conn, kind)?;
                                 }
                                 connection = Some(conn);
                             }
@@ -93,6 +127,40 @@ fn spawn_conn_thread(
         })
         .map_err(CoreError::Io)?;
     Ok(tx)
+}
+
+fn sqlite_cache_usage(conn: &Connection) -> Result<SqliteCacheUsage> {
+    let mut cache_bytes = 0i64;
+    let mut highwater = 0i64;
+    // SAFETY: This runs on the connection's dedicated thread with an exclusive
+    // borrow of its owner. SQLite only writes the two output integers here;
+    // neither the connection nor its handle escapes this call.
+    let code = unsafe {
+        rusqlite::ffi::sqlite3_db_status64(
+            conn.handle(),
+            rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
+            &mut cache_bytes,
+            &mut highwater,
+            0,
+        )
+    };
+    if code != rusqlite::ffi::SQLITE_OK {
+        return Err(CoreError::Other(format!(
+            "SQLite cache diagnostic failed with code {code}"
+        )));
+    }
+    let cache_size: i64 = conn.pragma_query_value(None, "cache_size", |row| row.get(0))?;
+    let cache_limit_kib = if cache_size < 0 {
+        cache_size.saturating_neg()
+    } else {
+        let page_size: i64 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
+        cache_size.saturating_mul(page_size).saturating_add(1023) / 1024
+    };
+    Ok(SqliteCacheUsage {
+        cache_bytes,
+        cache_limit_kib,
+        mmap_limit_bytes: conn.pragma_query_value(None, "mmap_size", |row| row.get(0))?,
+    })
 }
 
 fn open_connection(path: &Path, kind: StoreKind) -> Result<Connection> {
@@ -108,11 +176,10 @@ fn open_connection(path: &Path, kind: StoreKind) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     // Bound each connection's private page cache. The old 64 MiB setting was
     // applied independently to the reader and writer, allowing SQLite alone
-    // to retain roughly 128 MiB after a large mailbox scan. mmap remains a
-    // reclaimable file-backed fast path, but a large startup badge scan makes
-    // every touched page resident and visible in the process RSS. Keep the
-    // mapping no larger than the bounded private cache so an exact mailbox
-    // count cannot leave tens of MiB mapped after startup.
+    // to retain roughly 128 MiB after a large mailbox scan. The mail reader
+    // gets a smaller override in configure_query_connection; the writer keeps
+    // capacity for sync transactions. mmap remains a reclaimable file-backed
+    // fast path, but touched pages still appear in process RSS.
     let (mmap_size, cache_size_kib) = match kind {
         StoreKind::Mail => (8_388_608i64, 8_192i64),
         // Calendar queries touch a tiny working set compared with mailbox/FTS
@@ -288,6 +355,44 @@ impl Db {
         Ok(())
     }
 
+    /// Inspect currently live connections without opening a deferred store or
+    /// reopening a connection released by `release_idle_connections`.
+    /// SQLite reports allocated page-cache bytes, not mapped resident pages.
+    pub async fn cache_usage(&self) -> Result<Vec<DbConnectionCacheUsage>> {
+        let db = match &self.lazy {
+            Some(store) => match store.opened.get() {
+                Some(db) => db,
+                None => return Ok(Vec::new()),
+            },
+            None => self,
+        };
+        let writer = db.write_tx.as_ref().unwrap();
+        let reader = db.read_tx.as_ref().unwrap();
+        let mut usage = Vec::with_capacity(2);
+        for (role, tx) in [
+            ("writer", Some(writer)),
+            ("reader", (!reader.same_channel(writer)).then_some(reader)),
+        ]
+        .into_iter()
+        .filter_map(|(role, tx)| tx.map(|tx| (role, tx)))
+        {
+            let (reply, wait) = oneshot::channel();
+            tx.send(Command::Inspect(reply))
+                .await
+                .map_err(|_| CoreError::Other("db thread gone".into()))?;
+            if let Some(usage_for_connection) = wait
+                .await
+                .map_err(|_| CoreError::Other("db thread gone".into()))??
+            {
+                usage.push(DbConnectionCacheUsage {
+                    role,
+                    usage: usage_for_connection,
+                });
+            }
+        }
+        Ok(usage)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -447,6 +552,49 @@ mod connection_profile_tests {
     use rusqlite::config::DbConfig;
 
     #[tokio::test]
+    async fn cache_diagnostic_tracks_live_connections_without_reopening_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let deferred = Db::deferred_files(temp.path().join("files.db"));
+        assert!(deferred.cache_usage().await.unwrap().is_empty());
+        assert!(!temp.path().join("files.db").exists());
+
+        let mail = Db::open(&temp.path().join("mail.db")).unwrap();
+        let usage = mail.cache_usage().await.unwrap();
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].role, "writer");
+        assert_eq!(usage[1].role, "reader");
+        for connection in usage {
+            assert!(connection.usage.cache_bytes > 0);
+            assert_eq!(
+                connection.usage.cache_limit_kib,
+                if connection.role == "reader" {
+                    2_048
+                } else {
+                    8_192
+                }
+            );
+            assert_eq!(
+                connection.usage.mmap_limit_bytes,
+                if connection.role == "reader" {
+                    2_097_152
+                } else {
+                    8_388_608
+                }
+            );
+        }
+        mail.release_idle_connections().await.unwrap();
+        assert!(mail.cache_usage().await.unwrap().is_empty());
+
+        let calendar = Db::deferred_calendar(temp.path().join("calendar.db"));
+        assert!(calendar.cache_usage().await.unwrap().is_empty());
+        calendar.read(|_| Ok(())).await.unwrap();
+        let usage = calendar.cache_usage().await.unwrap();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].usage.cache_limit_kib, 2_048);
+        assert_eq!(usage[0].usage.mmap_limit_bytes, 0);
+    }
+
+    #[tokio::test]
     async fn deferred_store_opens_once_and_releases_without_losing_writes() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("files.db");
@@ -543,8 +691,8 @@ mod connection_profile_tests {
             .unwrap();
 
         assert_eq!(query_only, 1);
-        assert_eq!(mmap_size, 8_388_608);
-        assert_eq!(cache_size, -8_192);
+        assert_eq!(mmap_size, 2_097_152);
+        assert_eq!(cache_size, -2_048);
         assert!(defensive);
         assert_eq!(trusted_schema, 0);
         assert!(

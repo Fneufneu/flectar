@@ -13,6 +13,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/008_sender_identities.sql"),
     include_str!("migrations/009_contact_learning_clean_start.sql"),
     include_str!("migrations/010_folder_hierarchy.sql"),
+    include_str!("migrations/011_pending_body_page.sql"),
 ];
 pub const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -163,6 +164,10 @@ mod tests {
             ["thread_id", "folder_id", "account_id"]
         );
         assert_eq!(index_columns("idx_messages_body_fetching"), ["id"]);
+        assert_eq!(
+            index_columns("idx_messages_pending_body_page"),
+            ["folder_id", "date", "id"]
+        );
         assert_eq!(index_columns("idx_contacts_unfolded"), ["id"]);
         assert_eq!(
             index_columns("idx_threads_unread"),
@@ -192,6 +197,38 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn pending_body_index_upgrade_includes_existing_rows_and_tracks_completion() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS.iter().take(10).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", (index + 1) as i64)
+                .unwrap();
+        }
+        seed_mail_graph(&conn);
+        run(&mut conn).unwrap();
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages INDEXED BY idx_messages_pending_body_page
+                 WHERE uid IS NOT NULL AND body_state = 'none'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+        conn.execute("UPDATE messages SET body_state = 'cached' WHERE id = 1", [])
+            .unwrap();
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages INDEXED BY idx_messages_pending_body_page
+                 WHERE uid IS NOT NULL AND body_state = 'none'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 0);
     }
 
     #[test]

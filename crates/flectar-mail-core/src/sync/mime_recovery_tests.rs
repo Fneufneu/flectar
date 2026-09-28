@@ -348,7 +348,6 @@ async fn background_isolates_bad_uid_and_caches_both_siblings() {
             items,
         },
     ])));
-    let skip = Arc::new(Mutex::new(Default::default()));
     let persisted = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (_settings, rx) = watch::channel(f.config.settings.clone());
     tokio::time::timeout(
@@ -357,7 +356,6 @@ async fn background_isolates_bad_uid_and_caches_both_siblings() {
             f.ctx.clone(),
             f.config.clone(),
             queue,
-            skip,
             persisted.clone(),
             rx,
         ),

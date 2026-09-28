@@ -5,6 +5,23 @@ use tokio::sync::broadcast;
 
 use crate::models::SyncStatus;
 
+/// Opt-in receive diagnostics. Callers supply fixed stages/error codes only;
+/// addresses, server responses, credentials and message content stay out.
+pub(crate) fn sync_diagnostic(stage: &'static str, account_id: Option<i64>, outcome: &str) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !ENABLED.get_or_init(|| std::env::var("FLECTAR_SYNC_DIAGNOSTICS").as_deref() == Ok("1")) {
+        return;
+    }
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    eprintln!(
+        "FLECTAR_SYNC_DIAGNOSTIC {}",
+        serde_json::json!({
+            "elapsed_ms": START.get_or_init(std::time::Instant::now).elapsed().as_millis(),
+            "stage": stage, "account_id": account_id, "outcome": outcome,
+        })
+    );
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncProgress {
@@ -115,6 +132,17 @@ impl EventBus {
     }
 
     pub fn emit(&self, ev: CoreEvent) {
+        match &ev {
+            CoreEvent::AccountState {
+                account_id,
+                sync_state,
+                ..
+            } => {
+                sync_diagnostic("account_state", Some(*account_id), sync_state);
+            }
+            CoreEvent::MailUpdated { .. } => sync_diagnostic("mail_updated", None, "emitted"),
+            _ => {}
+        }
         // Nobody listening is fine (e.g. during tests).
         let _ = self.tx.send(ev);
     }

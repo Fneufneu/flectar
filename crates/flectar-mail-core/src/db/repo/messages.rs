@@ -1012,6 +1012,45 @@ pub fn missing_bodies_since(
     missing_bodies_at(conn, folder_id, limit, now_ms(), cutoff_ms)
 }
 
+/// One newest-first page for background body planning. The `(date, id)`
+/// cursor remains stable when many messages have the same timestamp.
+pub fn missing_bodies_page_since(
+    conn: &Connection,
+    folder_id: i64,
+    limit: i64,
+    cutoff_ms: Option<i64>,
+    cursor: Option<(i64, i64)>,
+) -> Result<Vec<(i64, i64, i64)>> {
+    let (before_date, before_id) = cursor.unwrap_or((i64::MAX, i64::MAX));
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.uid, m.date
+         FROM messages m
+         JOIN folders f ON f.id = m.folder_id
+         JOIN accounts a ON a.id = m.account_id
+         LEFT JOIN sync_failures sf
+           ON sf.stage = 'content' AND sf.message_id = m.id
+         WHERE m.folder_id = ?1 AND m.uid IS NOT NULL AND m.body_state = 'none'
+           AND (a.provider = 'gmail' OR COALESCE(f.role, '') <> 'all')
+           AND (sf.id IS NULL OR sf.next_retry_at IS NULL OR sf.next_retry_at <= ?3)
+           AND (?4 IS NULL OR COALESCE(m.internal_date, m.date) >= ?4)
+           AND (m.date, m.id) < (?5, ?6)
+         ORDER BY m.date DESC, m.id DESC LIMIT ?2",
+    )?;
+    Ok(stmt
+        .query_map(
+            params![
+                folder_id,
+                limit,
+                now_ms(),
+                cutoff_ms,
+                before_date,
+                before_id
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn missing_bodies_at(
     conn: &Connection,
     folder_id: i64,
@@ -1044,6 +1083,79 @@ fn missing_bodies_at(
 mod tests {
     use super::*;
     use crate::db::{repo::sync_failures, testutil};
+
+    #[test]
+    fn missing_body_pages_cover_equal_timestamps_without_repeating_ids() {
+        let conn = testutil::conn();
+        testutil::seed_account(&conn);
+        let (thread, _) = testutil::seed_message(&conn, "sender@example.com", "Subject", false);
+        for uid in 2..=7 {
+            conn.execute(
+                "INSERT INTO messages (thread_id, account_id, folder_id, uid, message_id, subject, date)
+                 VALUES (?1, 1, 1, ?2, 'page-' || ?2, 'Subject', 1000)",
+                params![thread, uid],
+            )
+            .unwrap();
+        }
+        let mut cursor = None;
+        let mut ids = Vec::new();
+        loop {
+            let page = missing_bodies_page_since(&conn, 1, 2, None, cursor).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|(id, _, date)| (*date, *id));
+            ids.extend(page.into_iter().map(|(id, _, _)| id));
+        }
+        assert_eq!(ids.len(), 7);
+        assert!(ids.windows(2).all(|pair| pair[0] > pair[1]));
+        let plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT m.id, m.uid, m.date FROM messages m
+                 JOIN folders f ON f.id = m.folder_id
+                 JOIN accounts a ON a.id = m.account_id
+                 LEFT JOIN sync_failures sf ON sf.stage = 'content' AND sf.message_id = m.id
+                 WHERE m.folder_id = 1 AND m.uid IS NOT NULL AND m.body_state = 'none'
+                   AND (a.provider = 'gmail' OR COALESCE(f.role, '') <> 'all')
+                   AND (sf.id IS NULL OR sf.next_retry_at IS NULL OR sf.next_retry_at <= 0)
+                   AND (m.date, m.id) < (1000, 9999)
+                 ORDER BY m.date DESC, m.id DESC LIMIT 2",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_messages_pending_body_page")
+                    && step.contains("date<?")),
+            "unexpected body-page plan: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn missing_body_page_defers_recorded_failure_without_a_memory_skip_set() {
+        let conn = testutil::conn();
+        testutil::seed_account(&conn);
+        let (_, failed_id) = testutil::seed_message(&conn, "sender@example.com", "Subject", false);
+        let first = missing_bodies_page_since(&conn, 1, 2, None, None).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, failed_id);
+
+        sync_failures::record_content(&conn, failed_id, Some(now_ms() + 60_000), "omitted")
+            .unwrap();
+        assert!(
+            missing_bodies_page_since(&conn, 1, 2, None, None)
+                .unwrap()
+                .is_empty()
+        );
+        sync_failures::clear_content(&conn, failed_id).unwrap();
+        assert_eq!(
+            missing_bodies_page_since(&conn, 1, 2, None, None).unwrap()[0].0,
+            failed_id
+        );
+    }
 
     #[test]
     fn preview_selects_only_the_newest_message_without_fetching_history() {
