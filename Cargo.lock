@@ -2259,6 +2259,7 @@ dependencies = [
  "blitz-html",
  "blitz-paint",
  "blitz-traits",
+ "image",
 ]
 
 [[package]]
