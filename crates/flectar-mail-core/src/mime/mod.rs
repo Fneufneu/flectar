@@ -1394,9 +1394,19 @@ fn domain_of(addr_or_domain: &str) -> &str {
 /// Relaxed alignment (as in DMARC): equal, or one is a subdomain of the other
 /// (`mailer.substack.com` aligns with `substack.com`). Case-insensitive.
 fn domains_aligned(a: &str, b: &str) -> bool {
-    let a = a.trim().trim_end_matches('.').to_ascii_lowercase();
-    let b = b.trim().trim_end_matches('.').to_ascii_lowercase();
-    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+    let a = a.trim().trim_end_matches('.');
+    let b = b.trim().trim_end_matches('.');
+    fn subdomain(candidate: &str, parent: &str) -> bool {
+        candidate
+            .len()
+            .checked_sub(parent.len())
+            .is_some_and(|offset| {
+                offset > 0
+                    && candidate.as_bytes()[offset - 1] == b'.'
+                    && candidate.as_bytes()[offset..].eq_ignore_ascii_case(parent.as_bytes())
+            })
+    }
+    a.eq_ignore_ascii_case(b) || subdomain(a, b) || subdomain(b, a)
 }
 
 /// The transmitting party to show as "via", when it doesn't align with From:.
@@ -2575,6 +2585,25 @@ mod tests {
                 let expected = format!("\n\nOn {when}, {who} <{}> wrote:\n{body}", from.email);
                 assert_eq!(quote_body(text, &from, timestamp), expected);
             }
+        }
+    }
+
+    #[test]
+    fn borrowed_domain_alignment_matches_case_and_dot_boundaries() {
+        for (a, b) in [
+            ("Sub.Example.COM.", " example.com "),
+            ("badexample.com", "example.com"),
+            ("é.EXAMPLE.com", "example.COM"),
+            ("", "."),
+            ("abc.", ""),
+            ("é.com", "É.com"),
+        ] {
+            let old_a = a.trim().trim_end_matches('.').to_ascii_lowercase();
+            let old_b = b.trim().trim_end_matches('.').to_ascii_lowercase();
+            let expected = old_a == old_b
+                || old_a.ends_with(&format!(".{old_b}"))
+                || old_b.ends_with(&format!(".{old_a}"));
+            assert_eq!(domains_aligned(a, b), expected, "{a} / {b}");
         }
     }
 
