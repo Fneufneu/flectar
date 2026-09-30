@@ -12,7 +12,6 @@ use crate::{
     models::AuthKind,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 const MAIL: &str = "urn:ietf:params:jmap:mail";
 #[derive(Clone, Debug)]
@@ -87,10 +86,7 @@ impl Core {
         if let Some(id) = local {
             return Ok(PathBuf::from(self.get_attachment(id).await?));
         }
-        let key = format!(
-            "{:x}",
-            Sha256::digest(format!("{}\0{}", remote.account, remote.blob))
-        );
+        let key = super::cache::content_key(&[&remote.account, &remote.blob]);
         let directory = self.paths.attachments_dir(file.account_id).join("remote");
         tokio::fs::create_dir_all(&directory).await?;
         let path = directory.join(key);
