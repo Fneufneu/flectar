@@ -322,7 +322,7 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
         account_ids: Vec::new(),
         is_managed: true,
     };
-    let mut emails: Vec<(bool, String)> = Vec::new();
+    let mut email: Option<(bool, String)> = None;
     for line in lines {
         let Some((head, raw)) = line.split_once(':') else {
             continue;
@@ -374,9 +374,14 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
                 .join(" ");
             }
             "EMAIL" if !value.is_empty() => {
-                let preferred = head.to_ascii_uppercase().contains("PREF=1")
-                    || head.to_ascii_uppercase().contains("TYPE=PREF");
-                emails.push((preferred, value));
+                let preferred =
+                    contains_ascii_case(head, "PREF=1") || contains_ascii_case(head, "TYPE=PREF");
+                if email
+                    .as_ref()
+                    .is_none_or(|(previous, _)| preferred && !previous)
+                {
+                    email = Some((preferred, value));
+                }
             }
             "TEL" if record.phone.is_empty() => record.phone = value,
             "ORG" => {
@@ -401,10 +406,7 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
             _ => {}
         }
     }
-    record.email = emails
-        .iter()
-        .find(|(preferred, _)| *preferred)
-        .or_else(|| emails.first())
+    record.email = email
         .map(|(_, email)| email.trim().to_lowercase())
         .unwrap_or_default();
     if record.email.is_empty() || !record.email.contains('@') {
