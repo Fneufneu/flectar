@@ -2187,12 +2187,11 @@ fn build_message_with_attachments<'a>(
         builder = builder.in_reply_to(irt.trim_matches(['<', '>']));
     }
     if !out.references.is_empty() {
-        let refs: Vec<&str> = out
-            .references
-            .iter()
-            .map(|r| r.trim_matches(['<', '>']))
-            .collect();
-        builder = builder.references(refs);
+        builder = builder.references(mail_builder::headers::message_id::MessageId::new_list(
+            out.references
+                .iter()
+                .map(|reference| reference.trim_matches(['<', '>'])),
+        ));
     }
 
     // Quoted-printable and UTF-8 text may expand during serialization.
