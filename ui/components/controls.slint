@@ -1,4 +1,4 @@
-import { AppTheme, LayoutMetrics } from "../design-system.slint";
+import { AppTheme, LayoutMetrics, ThemeUtilities } from "../design-system.slint";
 import { FocusVisibleScope } from "focus-visible-scope.slint";
 import { TypeScale } from "../typography.slint";
 
@@ -366,11 +366,12 @@ export component IconButton inherits Rectangle {
     width: 32px;
     height: 32px;
     border-radius: LayoutMetrics.corner-radius - 2px;
-    background: root.primary
+    private property <color> fill-color: root.primary
         ? (hit-area.pressed ? root.primary-pressed-background : hit-area.has-hover ? root.primary-hover-background : root.primary-background)
         : root.ghost
             ? (hit-area.pressed || root.active ? root.active-background : hit-area.has-hover ? root.hover-background : transparent)
             : root.active ? root.active-background : hit-area.has-hover ? root.hover-background : root.idle-background;
+    background: root.fill-color;
     forward-focus: keyboard;
     border-width: keyboard.focus-visible ? 2px : 0px;
     border-color: AppTheme.accent;
@@ -390,7 +391,7 @@ export component IconButton inherits Rectangle {
         width: root.icon-size;
         height: root.icon-size;
         source: root.icon;
-        colorize: root.primary ? white : root.icon-color;
+        colorize: root.primary ? ThemeUtilities.contrasting-foreground(root.fill-color) : root.icon-color;
         image-fit: contain;
         accessible-role: none;
         animate y { duration: 140ms; easing: spring(0); }

@@ -175,10 +175,33 @@ export global AppTheme {
     out property <color> destructive-pressed: #922d28;
 }
 
-// Formatting and parsing stay in Rust because Slint intentionally has no
-// integer-to-hex string primitive. These callbacks also make every color field
-// accept the same strict #RRGGBB format.
 export global ThemeUtilities {
+    pure function linear-channel(channel: int) -> float {
+        let value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+    }
+
+    pure function luminance(value: color) -> float {
+        return 0.2126 * self.linear-channel(value.red)
+            + 0.7152 * self.linear-channel(value.green)
+            + 0.0722 * self.linear-channel(value.blue);
+    }
+
+    public pure function contrast(first: color, second: color) -> float {
+        let first-luminance = self.luminance(first);
+        let second-luminance = self.luminance(second);
+        return (max(first-luminance, second-luminance) + 0.05)
+            / (min(first-luminance, second-luminance) + 0.05);
+    }
+
+    // Keep white where it meets AA, including the built-in button states.
+    // Otherwise black provides at least 4.5:1 against any opaque color.
+    public pure function contrasting-foreground(background: color) -> color {
+        return self.contrast(white, background) >= 4.5 ? white : black;
+    }
+
+    // Rust handles strict #RRGGBB parsing and formatting because Slint has no
+    // integer-to-hex string primitive.
     pure callback color-to-hex(color) -> string;
     pure callback parse-color(string, color) -> color;
     pure callback valid-color(string) -> bool;

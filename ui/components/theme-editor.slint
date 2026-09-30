@@ -378,6 +378,11 @@ export component RuntimeColorPicker inherits Rectangle {
     }
 }
 
+struct ThemeContrastCheck {
+    label: string,
+    ratio: float,
+}
+
 export component ThemeEditor inherits Rectangle {
     in property <bool> compact: false;
     in-out property <string> theme-mode: "system";
@@ -411,18 +416,18 @@ export component ThemeEditor inherits Rectangle {
         : root.selected-token == "text" ? root.current-text
         : root.current-border;
 
-    private property <float> light-text-page-contrast: root.contrast(AppTheme.custom-light-text, AppTheme.custom-light-page-bg);
-    private property <float> light-text-surface-contrast: root.contrast(AppTheme.custom-light-text, AppTheme.custom-light-surface);
-    private property <float> light-action-contrast: root.contrast(#ffffff, AppTheme.custom-light-primary);
+    private property <float> light-text-page-contrast: ThemeUtilities.contrast(AppTheme.custom-light-text, AppTheme.custom-light-page-bg);
+    private property <float> light-text-surface-contrast: ThemeUtilities.contrast(AppTheme.custom-light-text, AppTheme.custom-light-surface);
+    private property <float> light-action-contrast: ThemeUtilities.contrast(ThemeUtilities.contrasting-foreground(AppTheme.custom-light-primary), AppTheme.custom-light-primary);
     private property <color> light-faint-text: AppTheme.custom-light-text.mix(AppTheme.custom-light-page-bg, 0.68);
-    private property <float> light-faint-page-contrast: root.contrast(root.light-faint-text, AppTheme.custom-light-page-bg);
-    private property <float> light-faint-surface-contrast: root.contrast(root.light-faint-text, AppTheme.custom-light-surface);
-    private property <float> dark-text-page-contrast: root.contrast(AppTheme.custom-dark-text, AppTheme.custom-dark-page-bg);
-    private property <float> dark-text-surface-contrast: root.contrast(AppTheme.custom-dark-text, AppTheme.custom-dark-surface);
-    private property <float> dark-action-contrast: root.contrast(#ffffff, AppTheme.custom-dark-primary);
+    private property <float> light-faint-page-contrast: ThemeUtilities.contrast(root.light-faint-text, AppTheme.custom-light-page-bg);
+    private property <float> light-faint-surface-contrast: ThemeUtilities.contrast(root.light-faint-text, AppTheme.custom-light-surface);
+    private property <float> dark-text-page-contrast: ThemeUtilities.contrast(AppTheme.custom-dark-text, AppTheme.custom-dark-page-bg);
+    private property <float> dark-text-surface-contrast: ThemeUtilities.contrast(AppTheme.custom-dark-text, AppTheme.custom-dark-surface);
+    private property <float> dark-action-contrast: ThemeUtilities.contrast(ThemeUtilities.contrasting-foreground(AppTheme.custom-dark-primary), AppTheme.custom-dark-primary);
     private property <color> dark-faint-text: AppTheme.custom-dark-text.mix(AppTheme.custom-dark-page-bg, 0.68);
-    private property <float> dark-faint-page-contrast: root.contrast(root.dark-faint-text, AppTheme.custom-dark-page-bg);
-    private property <float> dark-faint-surface-contrast: root.contrast(root.dark-faint-text, AppTheme.custom-dark-surface);
+    private property <float> dark-faint-page-contrast: ThemeUtilities.contrast(root.dark-faint-text, AppTheme.custom-dark-page-bg);
+    private property <float> dark-faint-surface-contrast: ThemeUtilities.contrast(root.dark-faint-text, AppTheme.custom-dark-surface);
     private property <float> minimum-contrast: min(
         min(
             min(min(root.light-text-page-contrast, root.light-text-surface-contrast), root.light-action-contrast),
@@ -435,31 +440,27 @@ export component ThemeEditor inherits Rectangle {
     );
     private property <bool> contrast-valid: root.minimum-contrast >= 4.5;
 
-    height: AppTheme.preset == "custom"
+    private property <[ThemeContrastCheck]> contrast-checks: [
+        { label: @tr("Light · Text on canvas"), ratio: root.light-text-page-contrast },
+        { label: @tr("Light · Text on surface"), ratio: root.light-text-surface-contrast },
+        { label: @tr("Light · Secondary text on canvas"), ratio: root.light-faint-page-contrast },
+        { label: @tr("Light · Secondary text on surface"), ratio: root.light-faint-surface-contrast },
+        { label: @tr("Light · Primary button text"), ratio: root.light-action-contrast },
+        { label: @tr("Dark · Text on canvas"), ratio: root.dark-text-page-contrast },
+        { label: @tr("Dark · Text on surface"), ratio: root.dark-text-surface-contrast },
+        { label: @tr("Dark · Secondary text on canvas"), ratio: root.dark-faint-page-contrast },
+        { label: @tr("Dark · Secondary text on surface"), ratio: root.dark-faint-surface-contrast },
+        { label: @tr("Dark · Primary button text"), ratio: root.dark-action-contrast },
+    ];
+
+    vertical-stretch: 0;
+    min-height: AppTheme.preset == "custom"
         ? (root.compact ? 970px : 690px)
         : (root.compact ? 420px : 272px);
     border-radius: 8px;
     border-width: 1px;
     border-color: AppTheme.border-subtle;
     background: AppTheme.surface;
-
-    pure function linear-channel(channel: int) -> float {
-        let value = channel / 255;
-        return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
-    }
-
-    pure function luminance(value: color) -> float {
-        return 0.2126 * root.linear-channel(value.red)
-            + 0.7152 * root.linear-channel(value.green)
-            + 0.0722 * root.linear-channel(value.blue);
-    }
-
-    pure function contrast(first: color, second: color) -> float {
-        let first-luminance = root.luminance(first);
-        let second-luminance = root.luminance(second);
-        return (max(first-luminance, second-luminance) + 0.05)
-            / (min(first-luminance, second-luminance) + 0.05);
-    }
 
     function snapshot() {
         root.saved-light-primary = AppTheme.custom-light-primary;
@@ -548,7 +549,7 @@ export component ThemeEditor inherits Rectangle {
     }
 
     function persist() {
-        if root.dirty && root.contrast-valid {
+        if root.dirty {
             let saved = root.save-custom-theme(
                 AppTheme.custom-light-primary,
                 AppTheme.custom-light-page-bg,
@@ -678,21 +679,25 @@ export component ThemeEditor inherits Rectangle {
         }
         if AppTheme.preset == "custom" && root.compact : VerticalBox {
             height: 160px;
+            padding: 0px;
             spacing: 8px;
             HorizontalBox {
                 height: 48px;
+                padding: 0px;
                 spacing: 8px;
                 ThemeColorChip { horizontal-stretch: 1; min-width: 0px; name: @tr("Primary"); value: root.current-primary; selected: root.selected-token == "primary"; chosen => { root.selected-token = "primary"; } }
                 ThemeColorChip { horizontal-stretch: 1; min-width: 0px; name: @tr("Canvas"); value: root.current-page-bg; selected: root.selected-token == "page"; chosen => { root.selected-token = "page"; } }
             }
             HorizontalBox {
                 height: 48px;
+                padding: 0px;
                 spacing: 8px;
                 ThemeColorChip { horizontal-stretch: 1; min-width: 0px; name: @tr("Surface"); value: root.current-surface; selected: root.selected-token == "surface"; chosen => { root.selected-token = "surface"; } }
                 ThemeColorChip { horizontal-stretch: 1; min-width: 0px; name: @tr("Text"); value: root.current-text; selected: root.selected-token == "text"; chosen => { root.selected-token = "text"; } }
             }
             HorizontalBox {
                 height: 48px;
+                padding: 0px;
                 spacing: 8px;
                 Rectangle { horizontal-stretch: 1; }
                 ThemeColorChip { horizontal-stretch: 1; min-width: 0px; name: @tr("Border"); value: root.current-border; selected: root.selected-token == "border"; chosen => { root.selected-token = "border"; } }
@@ -706,22 +711,37 @@ export component ThemeEditor inherits Rectangle {
             edited(value) => { root.set-current-value(value); }
         }
 
-        if AppTheme.preset == "custom" : Rectangle {
-            height: root.compact ? 54px : 34px;
+        if AppTheme.preset == "custom" : contrast-status := Rectangle {
+            height: max(root.compact ? 54px : 34px, warning-layout.preferred-height);
             border-radius: 6px;
-            background: root.contrast-valid ? AppTheme.accent-soft : AppTheme.destructive.with-alpha(0.12);
-            Text {
-                x: 10px;
-                width: parent.width - 20px;
-                height: parent.height;
-                text: root.contrast-valid
-                    ? @tr("Core colors meet WCAG AA · minimum {}:1", root.minimum-contrast.to-fixed(1))
-                    : @tr("Not saved · text and primary contrast must reach 4.5:1 (now {}:1)", root.minimum-contrast.to-fixed(1));
-                color: root.contrast-valid ? AppTheme.body : AppTheme.destructive;
-                font-size: TypeScale.caption;
-                font-weight: 600;
-                vertical-alignment: center;
-                wrap: word-wrap;
+            private property <color> fill-color: root.contrast-valid ? AppTheme.accent-soft : AppTheme.destructive.mix(AppTheme.surface, 0.12);
+            private property <color> foreground: ThemeUtilities.contrasting-foreground(self.fill-color);
+            background: self.fill-color;
+            warning-layout := VerticalLayout {
+                padding: 10px;
+                spacing: 0px;
+                Text {
+                    text: root.contrast-valid
+                        ? @tr("Checked text contrast meets 4.5:1 · minimum {}:1", root.minimum-contrast.to-fixed(2))
+                        : @tr("Low contrast · 4.5:1 is recommended for text. You can still save this palette.");
+                    color: contrast-status.foreground;
+                    font-size: TypeScale.caption;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                for check in root.contrast-checks : Rectangle {
+                    height: check.ratio < 4.5 ? check-label.preferred-height + 4px : 0px;
+                    visible: check.ratio < 4.5;
+                    check-label := Text {
+                        y: 4px;
+                        width: parent.width;
+                        height: self.preferred-height;
+                        text: @tr("{} · {}:1", check.label, check.ratio.to-fixed(2));
+                        color: contrast-status.foreground;
+                        font-size: TypeScale.caption;
+                        wrap: word-wrap;
+                    }
+                }
             }
         }
 
@@ -731,7 +751,7 @@ export component ThemeEditor inherits Rectangle {
             Button { text: root.compact ? @tr("Reset") : @tr("Reset this palette"); clicked => { root.reset-current-palette(); } }
             Rectangle { horizontal-stretch: 1; }
             Button { text: @tr("Revert"); enabled: root.dirty; clicked => { root.revert(); } }
-            Button { text: root.compact ? @tr("Save") : @tr("Save palette"); primary: true; enabled: root.dirty && root.contrast-valid; clicked => { root.persist(); } }
+            Button { text: root.compact ? @tr("Save") : @tr("Save palette"); primary: true; enabled: root.dirty; clicked => { root.persist(); } }
         }
     }
 }
