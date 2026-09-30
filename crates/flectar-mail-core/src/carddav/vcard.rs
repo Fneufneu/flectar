@@ -354,20 +354,27 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
             continue;
         }
         let decoded = decoded_value(head, raw);
-        let value = unescape(&decoded).trim().to_owned();
+        let value = if matches!(name, "N" | "ORG" | "ADR") {
+            String::new()
+        } else {
+            unescape(&decoded).trim().to_owned()
+        };
         match name {
             "FN" => record.name = value,
             "N" if record.name.is_empty() => {
                 let parts = split_escaped(decoded.trim(), ';');
-                record.name = [
+                for part in [
                     parts.get(1).copied().unwrap_or(""),
                     parts.first().copied().unwrap_or(""),
                 ]
                 .into_iter()
-                .filter(|v| !v.is_empty())
-                .map(unescape)
-                .collect::<Vec<_>>()
-                .join(" ");
+                .filter(|value| !value.is_empty())
+                {
+                    if !record.name.is_empty() {
+                        record.name.push(' ');
+                    }
+                    record.name.push_str(&unescape(part));
+                }
             }
             "EMAIL" if !value.is_empty() => {
                 let preferred =
@@ -390,12 +397,17 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
             "URL" if record.website.is_empty() => record.website = value,
             "BDAY" => record.birthday = value,
             "ADR" => {
-                record.postal_address = split_escaped(decoded.trim(), ';')
-                    .into_iter()
-                    .map(|value| unescape(&value).trim().to_owned())
-                    .filter(|v| !v.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                record.postal_address.clear();
+                for part in split_escaped(decoded.trim(), ';') {
+                    let unescaped = unescape(part);
+                    let value = unescaped.trim();
+                    if !value.is_empty() {
+                        if !record.postal_address.is_empty() {
+                            record.postal_address.push_str(", ");
+                        }
+                        record.postal_address.push_str(value);
+                    }
+                }
             }
             "NOTE" => record.notes = value,
             "CATEGORIES" => record.tags = value,
