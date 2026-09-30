@@ -165,6 +165,11 @@ def read_proc_mappings(pid: int, executable: Path) -> dict[str, Any]:
     )
 
 
+def runtime_executable(pid: int) -> Path:
+    """Find the ELF after a launcher script has replaced itself with the app."""
+    return Path(os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)"))
+
+
 def read_cpu_seconds(pid: int) -> float:
     fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
     ticks = int(fields[13]) + int(fields[14])
@@ -307,7 +312,9 @@ def run_once(
             final_cpu = read_cpu_seconds(process.pid)
             resources = read_proc_resources(process.pid)
             mapping_report = (
-                read_proc_mappings(process.pid, binary) if include_mappings else None
+                read_proc_mappings(process.pid, runtime_executable(process.pid))
+                if include_mappings
+                else None
             )
             resources["idle_cpu_percent"] = (
                 max(0.0, final_cpu - initial_cpu) / idle_elapsed * 100.0

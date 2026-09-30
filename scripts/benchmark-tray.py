@@ -47,7 +47,9 @@ def run(binary, screenshots, include_mappings=False):
                 resources["idle_cpu_percent"] = (startup.read_cpu_seconds(process.pid) - cpu) / (time.monotonic() - began) * 100
                 phases[phase] = resources
                 if include_mappings:
-                    phase_mappings[phase] = startup.read_proc_mappings(process.pid, binary)
+                    phase_mappings[phase] = startup.read_proc_mappings(
+                        process.pid, startup.runtime_executable(process.pid)
+                    )
             process.wait(timeout=8)
             startup.drain_messages(messages, events, tail)
             if process.returncode:

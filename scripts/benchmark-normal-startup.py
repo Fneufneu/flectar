@@ -70,7 +70,9 @@ def run_once(
                     raise RuntimeError(f"application exited before sample: {process.returncode}")
                 resources = startup.read_proc_resources(process.pid)
                 mappings = (
-                    startup.read_proc_mappings(process.pid, binary)
+                    startup.read_proc_mappings(
+                        process.pid, startup.runtime_executable(process.pid)
+                    )
                     if include_mappings
                     else None
                 )

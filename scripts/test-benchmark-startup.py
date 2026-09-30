@@ -3,6 +3,10 @@
 
 import importlib.util
 import json
+import shutil
+import subprocess
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -14,6 +18,31 @@ spec.loader.exec_module(benchmark)
 
 
 class SmapsParsingTests(unittest.TestCase):
+    def test_launcher_exec_is_attributed_to_the_running_elf(self):
+        sleep = shutil.which("sleep")
+        if sleep is None or not Path("/proc/self/smaps").exists():
+            self.skipTest("requires Linux procfs and sleep")
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = Path(directory) / "AppRun"
+            launcher.write_text('#!/bin/sh\nexec "$1" 30\n', encoding="utf-8")
+            launcher.chmod(0o755)
+            process = subprocess.Popen([str(launcher), sleep])
+            try:
+                deadline = time.monotonic() + 2
+                while True:
+                    executable = benchmark.runtime_executable(process.pid)
+                    if executable == Path(sleep).resolve():
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail("launcher did not exec the target ELF")
+                    time.sleep(0.01)
+                report = benchmark.read_proc_mappings(process.pid, executable)
+                self.assertGreater(report["by_kind"]["executable"]["rss_kib"], 0)
+                self.assertNotIn(directory, json.dumps(report))
+            finally:
+                process.terminate()
+                process.wait(timeout=2)
+
     def test_mappings_are_counted_without_profile_paths(self):
         smaps = """\
 55550000-55551000 r-xp 00000000 08:01 10 /opt/flectar-mail
