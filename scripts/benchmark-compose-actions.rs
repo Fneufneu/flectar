@@ -1,4 +1,4 @@
-//! Measure production document export, block formatting and list continuation.
+//! Measure production document export, block formatting, selection formatting and replay.
 //! rustc --edition=2024 -O scripts/benchmark-compose-actions.rs -o /tmp/compose-actions
 //! /tmp/compose-actions export uniform 1048576 10
 //! For a matched source baseline, set COMPOSE_DOCUMENT_SOURCE to its absolute
@@ -75,7 +75,10 @@ fn main() {
     assert_eq!(args.len(), 5, "expected action scenario bytes samples");
     let action = args[1].as_str();
     let scenario = args[2].as_str();
-    assert!(matches!(action, "export" | "block" | "list"));
+    assert!(matches!(
+        action,
+        "export" | "block" | "list" | "format" | "undo" | "redo" | "replace"
+    ));
     assert!(matches!(scenario, "uniform" | "fragmented" | "linked"));
     let bytes: usize = args[3].parse().expect("draft bytes");
     let samples: usize = args[4].parse().expect("samples");
@@ -106,12 +109,30 @@ fn main() {
             }
             _ => {}
         }
+        if matches!(action, "undo" | "redo") {
+            document.format("italic", &base, end / 2, end / 2 + 1);
+            if action == "redo" {
+                document.history("undo").expect("prepared undo");
+            }
+        }
         let before = LIVE.load(Ordering::Relaxed);
         PEAK.store(before, Ordering::Relaxed);
         CALLS.store(0, Ordering::Relaxed);
         let started = Instant::now();
         let output = match action {
             "export" => document.body_html(),
+            "format" => {
+                document.format("italic", &base, end / 2, end / 2 + 1);
+                None
+            }
+            "undo" | "redo" => {
+                document.history(action).expect("prepared history action");
+                None
+            }
+            "replace" => {
+                document.synchronize("y", 1, 1);
+                None
+            }
             "block" => {
                 document.format("bullet", &base, 0, end);
                 None
