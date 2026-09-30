@@ -1,5 +1,5 @@
 import { HorizontalBox } from "std-widgets.slint";
-import { EmailLink, EmailRow, EmailTile, SidebarRow, MailLabelRow, MailListEntry, ThreadMessageRow } from "../models.slint";
+import { EmailLink, EmailRow, EmailTile, EmailReader, SidebarRow, MailLabelRow, MailListEntry, ThreadMessageRow } from "../models.slint";
 import { LayoutMetrics } from "../design-system.slint";
 import { MailSidebar } from "../components/sidebar.slint";
 import { WorkspacePaneResizeHandle } from "../components/workspace-layout.slint";
@@ -8,7 +8,9 @@ import { MailReadingPane } from "mail-reading-pane.slint";
 
 // Mail workspace composition. AppWindow owns the public state while this
 // component owns the feature layout, interaction wiring, and clipboard bridge.
-export component MailView inherits Rectangle {
+export component MailView inherits FocusScope {
+    focus-on-tab-navigation: false;
+    focus-on-click: false;
     in property <bool> compact: false;
     in property <length> available-width: 0px;
     // Keep the animated geometry outside conditionally instantiated sidebars.
@@ -80,6 +82,7 @@ export component MailView inherits Rectangle {
     in-out property <string> settings_tab: "General";
     in-out property <string> compact-page: "list";
     in-out property <bool> folders-open: false;
+    private property <bool> focus-list-after-settings: false;
     private property <bool> single-pane: root.compact || root.layout-mode == "minimal";
     private property <length> list-pane-maximum-width: max(
         LayoutMetrics.list-pane-width,
@@ -162,11 +165,65 @@ export component MailView inherits Rectangle {
         }
     }
 
+    public function focus-list() {
+        if root.single-pane { compact-list-pane.focus-list(); }
+        else { desktop-list-pane.focus-list(); }
+    }
+
+    function focus-reader() {
+        if root.has_selected {
+            if root.single-pane { compact-reading-pane.focus-content(); }
+            else { desktop-reading-pane.focus-content(); }
+        }
+    }
+
+    init => {
+        if root.single-pane && root.compact-page == "message" { root.focus-reader(); }
+        else { root.focus-list(); }
+    }
+    changed compact-page => {
+        if root.compact-page == "list" { root.focus-list(); }
+        else { root.focus-reader(); }
+    }
+    capture-key-pressed(event) => {
+        if event.modifiers.control || event.modifiers.meta || event.modifiers.alt { return reject; }
+        if event.text == Key.F6 {
+            if root.single-pane && root.compact-page == "message" {
+                root.compact-page = "list";
+                root.close_preview();
+            } else if !root.single-pane && desktop-list-pane.keyboard-focused {
+                root.focus-reader();
+            } else {
+                root.focus-list();
+            }
+            return accept;
+        }
+        if event.text == Key.Escape && root.single-pane && root.compact-page == "message"
+            && !EmailReader.find-open && !root.has_selection && !EmailReader.caret-mode {
+            root.compact-page = "list";
+            root.close_preview();
+            return accept;
+        }
+        reject
+    }
+
     changed layout-mode => {
         if (root.layout-mode == "minimal") {
             root.compact-page = "list";
             root.folders-open = false;
         }
+        if root.settings_open { root.focus-list-after-settings = true; }
+        else { root.focus-list(); }
+    }
+    changed settings_open => {
+        if !root.settings_open && root.focus-list-after-settings {
+            root.focus-list-after-settings = false;
+            root.focus-list();
+        }
+    }
+    changed compact => {
+        if root.single-pane && root.compact-page == "message" { root.focus-reader(); }
+        else { root.focus-list(); }
     }
 
         HorizontalBox {
@@ -220,7 +277,7 @@ export component MailView inherits Rectangle {
                 }
             }
 
-            MailListPane {
+            desktop-list-pane := MailListPane {
                 width: root.effective-list-pane-width;
                 show-avatars: root.show-avatars;
                 loading: root.loading;
@@ -255,6 +312,7 @@ export component MailView inherits Rectangle {
                 surface: root.surface;
                 title-color: root.title-color;
                 select_email(id) => { root.select_email(id); }
+                open_email(id) => { root.select_email(id); root.focus-reader(); }
                 search_changed(query) => { root.search_changed(query); }
                 set_search_filter(filter) => { root.set_search_filter(filter); }
                 load_more => { root.load_more(); }
@@ -351,7 +409,7 @@ export component MailView inherits Rectangle {
                 select_email(id) => { root.select_email(id); }
                 select_thread_message(index) => { root.select_thread_message(index); }
                 compose_message_action(action) => { root.compose_message_action(action); }
-                close_preview => { root.close_preview(); }
+                close_preview => { root.close_preview(); root.focus-list(); }
                 print_message => { root.print_message(); }
                 open_message_in_browser => { root.open_message_in_browser(); }
                 open_email_link(url) => { root.open_email_link(url); }
@@ -449,6 +507,7 @@ export component MailView inherits Rectangle {
                 animate opacity { duration: 170ms; easing: ease-out; }
                 compact: root.compact;
                 single-pane-navigation: root.compact;
+                preview-on-navigation: false;
                 show-avatars: root.show-avatars;
                 dense: !root.compact;
                 emails: root.emails;
@@ -485,6 +544,12 @@ export component MailView inherits Rectangle {
                     root.select_email(id);
                     root.compact-page = "message";
                     root.folders-open = false;
+                }
+                open_email(id) => {
+                    root.select_email(id);
+                    root.compact-page = "message";
+                    root.folders-open = false;
+                    root.focus-reader();
                 }
                 search_changed(query) => { root.search_changed(query); }
                 set_search_filter(filter) => { root.set_search_filter(filter); }

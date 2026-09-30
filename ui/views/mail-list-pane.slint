@@ -1,6 +1,6 @@
 import { InfiniteScrollController } from "../components/infinite-scroll-controller.slint";
 import { HorizontalBox, ListView, VerticalBox } from "std-widgets.slint";
-import { EmailRow, MailDragApi, MailListEntry } from "../models.slint";
+import { EmailRow, MailDragApi, MailListEntry, MailListNavigation, MailNavigationTarget } from "../models.slint";
 import { Avatar } from "../components/avatar.slint";
 import { Button } from "../components/button.slint";
 import { FloatingActionButton, SelectionCheckBox, ToolbarIconButton } from "../components/controls.slint";
@@ -164,6 +164,7 @@ export component MailListPane inherits Rectangle {
     // Single-surface navigation is also used by the desktop Minimal layout;
     // keep it separate from compact sizing so desktop controls stay dense.
     in property <bool> single-pane-navigation: root.compact;
+    in property <bool> preview-on-navigation: !root.compact;
     in property <bool> show-avatars: true;
     in property <bool> dense: false;
     in property <bool> loading: false;
@@ -203,6 +204,7 @@ export component MailListPane inherits Rectangle {
     in property <color> surface;
     in property <color> title-color;
     callback select_email(int);
+    callback open_email(int);
     callback search_changed(string);
     callback set_search_filter(string);
     callback load_more();
@@ -214,6 +216,52 @@ export component MailListPane inherits Rectangle {
     callback toggle_mail_group(string);
     callback set_email_checked(int, bool);
     callback set_all_emails_checked(bool);
+
+    out property <int> keyboard-email-id: -1;
+    out property <bool> keyboard-focused: list-keyboard.has-focus;
+    out property <length> scroll-y: mail-list-scroll.content-y;
+    private property <int> keyboard-entry-index: -1;
+    private property <length> message-row-height: root.dense ? 44px : 96px;
+    private property <length> group-row-height: root.compact ? 44px : 40px;
+    forward-focus: list-keyboard;
+
+    function reveal-target(target: MailNavigationTarget) {
+        if mail-list-scroll.visible-height <= 0px { return; }
+        let top = target.preceding_headers * root.group-row-height
+            + target.preceding_messages * root.message-row-height;
+        if top < -mail-list-scroll.content-y {
+            mail-list-scroll.content-y = -top;
+        } else if top + root.message-row-height > -mail-list-scroll.content-y + mail-list-scroll.visible-height {
+            mail-list-scroll.content-y = min(0px, mail-list-scroll.visible-height - top - root.message-row-height);
+        }
+    }
+
+    function move-cursor(movement: string, step: int, preview: bool) {
+        let target = MailListNavigation.target(root.list_entries, root.keyboard-email-id, movement, step);
+        if target.id < 0 || root.list_entries.length == 0 {
+            root.keyboard-email-id = -1;
+            root.keyboard-entry-index = -1;
+            return;
+        }
+        root.keyboard-email-id = target.id;
+        root.keyboard-entry-index = target.entry_index;
+        root.reveal-target(target);
+        if preview && root.preview-on-navigation { root.select_email(target.id); }
+        pagination.user-scrolled();
+    }
+
+    public function focus-list() {
+        list-keyboard.focus();
+        root.move-cursor("current", 1, false);
+    }
+
+    function pointer-focus(id: int) {
+        root.keyboard-email-id = id;
+        let target = MailListNavigation.target(root.list_entries, id, "current", 1);
+        root.keyboard-entry-index = target.entry_index;
+        list-keyboard.focus();
+        list-keyboard.pointer-activated();
+    }
 
     animate bulk-toolbar-height { duration: 180ms; easing: spring(0); }
 
@@ -227,6 +275,8 @@ export component MailListPane inherits Rectangle {
         load-more => { root.load-more(); }
     }
     function reset-pagination() {
+        root.keyboard-email-id = -1;
+        root.keyboard-entry-index = -1;
         mail-list-scroll.content-y = 0px;
         pagination.reset();
     }
@@ -418,6 +468,39 @@ export component MailListPane inherits Rectangle {
                         vertical-stretch: 1;
                         background: root.surface;
 
+                        list-keyboard := FocusVisibleScope {
+                            width: parent.width;
+                            height: parent.height;
+                            focus-on-tab-navigation: true;
+                            focus-on-click: false;
+                            accessible-role: none;
+                            changed has-focus => {
+                                if self.has-focus { root.move-cursor("current", 1, false); }
+                            }
+                            key-pressed(event) => {
+                                // Child controls keep their own activation and navigation.
+                                if !self.has-focus || event.modifiers.control || event.modifiers.meta || event.modifiers.alt || event.modifiers.shift { return reject; }
+                                let page = max(1, floor(mail-list-scroll.visible-height / root.message-row-height));
+                                if event.text == Key.DownArrow { root.move-cursor("next", 1, true); return accept; }
+                                if event.text == Key.UpArrow { root.move-cursor("previous", 1, true); return accept; }
+                                if event.text == Key.Home { root.move-cursor("first", 1, true); return accept; }
+                                if event.text == Key.End { root.move-cursor("last", 1, true); return accept; }
+                                if event.text == Key.PageDown { root.move-cursor("next", page, true); return accept; }
+                                if event.text == Key.PageUp { root.move-cursor("previous", page, true); return accept; }
+                                if event.text == Key.Return {
+                                    root.move-cursor("current", 1, false);
+                                    if root.keyboard-email-id >= 0 { root.open_email(root.keyboard-email-id); }
+                                    return accept;
+                                }
+                                if event.text == Key.Space {
+                                    root.move-cursor("current", 1, false);
+                                    let target = MailListNavigation.target(root.list_entries, root.keyboard-email-id, "current", 1);
+                                    if target.id >= 0 { root.set_email_checked(target.id, !target.checked); }
+                                    return accept;
+                                }
+                                reject
+                            }
+
                         WorkspaceListTransition {
                             x: 0px;
                             y: 0px;
@@ -435,6 +518,7 @@ export component MailListPane inherits Rectangle {
                             mouse-drag-pan-enabled: root.compact;
                             accessible-label: root.scope_title;
                             accessible-item-count: root.emails.length;
+                            accessible-delegate-focus: list-keyboard.has-focus ? root.keyboard-entry-index : -1;
                             scrolled => {
                                 pagination.user-scrolled();
                             }
@@ -454,6 +538,8 @@ export component MailListPane inherits Rectangle {
                                 clip: true;
                                 opacity: !entry.is_header && row-drag.dragging ? 0.55 : 1;
                                 background: entry.is_header ? root.surface : mail-data.checked ? root.accent-soft : mail-data.selected ? root.selected-row : root.surface;
+                                border-width: !entry.is_header && entry.show_row && list-keyboard.focus-visible && root.keyboard-email-id == mail-data.id ? 2px : 0px;
+                                border-color: root.accent;
                                 animate opacity { duration: 120ms; }
                                 animate height { duration: 230ms; easing: spring(0); enabled: MotionSettings.enabled; }
                                 accessible-role: none;
@@ -476,6 +562,7 @@ export component MailListPane inherits Rectangle {
                                     accessible-item-selectable: true;
                                     accessible-item-selected: root.selection-mode ? mail-data.checked : mail-data.selected;
                                     accessible-action-default => {
+                                        root.pointer-focus(mail-data.id);
                                         if (root.compact && root.selection-mode) {
                                             root.set_email_checked(mail-data.id, !mail-data.checked);
                                         } else {
@@ -761,6 +848,7 @@ export component MailListPane inherits Rectangle {
                                                         mail-row.long-press-triggered = false;
                                                         mail-row.touch-pending = true;
                                                     } else {
+                                                        root.pointer-focus(mail-data.id);
                                                         root.select_email(mail-data.id);
                                                     }
                                                 }
@@ -778,6 +866,7 @@ export component MailListPane inherits Rectangle {
                                                         && !mail-row.long-press-triggered;
                                                     mail-row.touch-pending = false;
                                                     if activate {
+                                                        root.pointer-focus(mail-data.id);
                                                         if root.selection-mode {
                                                             root.set_email_checked(mail-data.id, !mail-data.checked);
                                                         } else {
@@ -837,6 +926,7 @@ export component MailListPane inherits Rectangle {
                                     }
                                 }
                             }
+                        }
                         }
                         }
                         if root.loading && root.emails.length == 0 : Rectangle {

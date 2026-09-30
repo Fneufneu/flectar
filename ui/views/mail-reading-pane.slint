@@ -464,6 +464,13 @@ export component MailReadingPane inherits Rectangle {
     callback select-email-text();
     callback load-remote-images-for-message();
 
+    public function focus-content() {
+        if root.source_mode { source-editor.focus(); }
+        else if root.text_mode { plain-text-editor.focus(); }
+        else if EmailReader.reader-mode { reader-focus.focus(); }
+        else { email-focus.focus(); }
+    }
+
     private property <bool> viewport-pending: false;
     private property <int> transition-message-id: EmailReader.message-id;
     private property <float> animated-content-reveal: 1;
@@ -1339,7 +1346,8 @@ export component MailReadingPane inherits Rectangle {
                                         }
                                     }
 
-                                    if root.text_mode : TextEdit {
+                                    plain-text-editor := TextEdit {
+                                        visible: root.text_mode;
                                         x: 16px;
                                         y: 54px;
                                         width: parent.width - 32px;
@@ -1587,11 +1595,34 @@ export component MailReadingPane inherits Rectangle {
                                     }
                                 }
 
-                                if EmailReader.reader-mode : Rectangle {
+                                reader-focus := FocusVisibleScope {
+                                    visible: EmailReader.reader-mode;
+                                    enabled: root.has_selected && EmailReader.reader-mode;
+                                    focus-on-tab-navigation: true;
+                                    accessible-role: text;
+                                    accessible-label: root.selected_plain_text;
+                                    key-pressed(event) => {
+                                        if !self.has-focus || event.modifiers.control || event.modifiers.meta || event.modifiers.alt || event.modifiers.shift { return reject; }
+                                        let page = max(1px, reader-list.visible-height - 32px);
+                                        let limit = max(0px, reader-list.content-height - reader-list.visible-height);
+                                        if event.text == Key.DownArrow { reader-list.content-y = max(-limit, reader-list.content-y - 40px); return accept; }
+                                        if event.text == Key.UpArrow { reader-list.content-y = min(0px, reader-list.content-y + 40px); return accept; }
+                                        if event.text == Key.PageDown || event.text == Key.Space { reader-list.content-y = max(-limit, reader-list.content-y - page); return accept; }
+                                        if event.text == Key.PageUp { reader-list.content-y = min(0px, reader-list.content-y + page); return accept; }
+                                        if event.text == Key.Home { reader-list.content-y = 0px; return accept; }
+                                        if event.text == Key.End { reader-list.content-y = -limit; return accept; }
+                                        reject
+                                    }
                                     x: -email-scroll.content-x + root.message-card-inset + root.message-card-border-width;
                                     y: root.message-body-y;
                                     width: root.email-viewport-width; height: root.message-body-content-height;
-                                    background: EmailReader.dark-reader ? #171a21 : root.surface;
+                                    Rectangle {
+                                        width: parent.width; height: parent.height;
+                                        background: EmailReader.dark-reader ? #171a21 : root.surface;
+                                        border-width: reader-focus.focus-visible ? 2px : 0px;
+                                        border-color: root.accent;
+                                        accessible-role: none;
+                                    }
                                     reader-list := ListView {
                                         width: parent.width; height: parent.height;
                                         content-width: self.visible-width;

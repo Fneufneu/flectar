@@ -19,6 +19,7 @@ mod ios_documents;
 mod latest_load;
 mod mail;
 mod mail_groups;
+mod mail_navigation;
 mod mail_render_projection;
 mod mail_setup;
 mod mail_view_model;
@@ -1352,6 +1353,8 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     // zero-wait read-only lookup, then map the first frame at its saved width.
     // Full settings validation still happens during normal background startup.
     let app = renderer_preferences::initialize_step(use_wgpu, AppWindow::new)?;
+    app.global::<MailListNavigation>()
+        .on_target(mail_navigation::target);
     if let Some(width) = flectar_mail_core::startup_workspace_list_pane_width(&platform.paths) {
         app.set_workspace_list_pane_width(width as f32);
     }

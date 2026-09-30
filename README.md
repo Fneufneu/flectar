@@ -139,6 +139,14 @@ and orange for Support.
 Replies stay grouped in chronological order, with the active message expanded
 inside the reading pane.
 
+Use **Up/Down** to navigate messages, **Home/End** to jump to the first or last
+loaded message, and **Page Up/Page Down** to move a page at a time. **Enter**
+opens the current message and focuses its content; **Space** checks or unchecks
+it for bulk actions. **Tab/Shift+Tab** move between controls. In the full
+workspace, **F6** moves focus between the message list and reader. In the minimal
+layout, arrow keys highlight messages and **Enter** opens them; **Escape** or
+**F6** returns to the list.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="resources/screenshots/desktop-thread-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="resources/screenshots/desktop-thread-light.png">

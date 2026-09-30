@@ -89,6 +89,7 @@ export component TextEdit inherits Rectangle {
     callback edited(string);
     callback select-all;
     callback copy;
+    forward-focus: editor;
 
     min-height: 80px;
     border-radius: LayoutMetrics.corner-radius - 2px;

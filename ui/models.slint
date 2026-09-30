@@ -138,6 +138,20 @@ export struct MailListEntry {
     email: EmailRow,
 }
 
+// Resolve keyboard movement against the entire model, including messages
+// outside the virtualized viewport. Geometry stays in the Slint component.
+export struct MailNavigationTarget {
+    id: int,
+    entry_index: int,
+    preceding_headers: int,
+    preceding_messages: int,
+    checked: bool,
+}
+
+export global MailListNavigation {
+    pure callback target([MailListEntry], int, string, int) -> MailNavigationTarget;
+}
+
 export struct MailProfileRow {
     id: string,
     name: string,
