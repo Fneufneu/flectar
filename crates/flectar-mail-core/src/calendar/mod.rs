@@ -627,11 +627,19 @@ fn param_value(v: &str) -> Cow<'_, str> {
 
 fn organizer_prop(out: &mut String, addr: &Address) {
     match &addr.name {
-        Some(n) if !n.is_empty() => fold(
-            &format!("ORGANIZER;CN={}:mailto:{}", param_value(n), addr.email),
-            out,
-        ),
-        _ => fold(&format!("ORGANIZER:mailto:{}", addr.email), out),
+        Some(name) if !name.is_empty() => {
+            let name = param_value(name);
+            fold_parts(
+                [
+                    "ORGANIZER;CN=",
+                    name.as_ref(),
+                    ":mailto:",
+                    addr.email.as_str(),
+                ],
+                out,
+            );
+        }
+        _ => fold_parts(["ORGANIZER:mailto:", addr.email.as_str()], out),
     }
 }
 
@@ -724,7 +732,7 @@ pub fn build_reply_ics(spec: &ReplySpec) -> String {
         if let Some(s) = spec.summary {
             push_prop(out, "SUMMARY", &escape(s));
         }
-        fold(&format!("ORGANIZER:mailto:{}", spec.organizer_email), out);
+        fold_parts(["ORGANIZER:mailto:", spec.organizer_email], out);
         let cn = spec
             .attendee
             .name
