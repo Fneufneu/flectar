@@ -145,9 +145,16 @@ pub(super) fn project_mail_list<M: std::borrow::Borrow<MailMessage>>(
     // latest message before flattening.
     let mut ordered = Vec::<(DateGroup, i64, Vec<&EmailRow>)>::new();
     let mut group_indices = HashMap::<String, usize>::new();
+    let mut older_rows = Vec::new();
     for (message, row) in messages.iter().zip(rows) {
         let message = std::borrow::Borrow::borrow(message);
         let group = date_group(message.date_ms, now);
+        // Only recent calendar sections are accordions. Older and undated
+        // mail stays visible as one flat tail, regardless of collapse state.
+        if matches!(group.kind, "last-month" | "month" | "unknown") {
+            older_rows.push(row);
+            continue;
+        }
         if let Some(&index) = group_indices.get(&group.key) {
             let (_, latest, group_rows) = &mut ordered[index];
             *latest = (*latest).max(message.date_ms);
@@ -188,6 +195,10 @@ pub(super) fn project_mail_list<M: std::borrow::Borrow<MailMessage>>(
             }
             display_index += 1;
         }
+    }
+    for row in older_rows {
+        entries.push(message_entry(row, display_index, "", true, false));
+        display_index += 1;
     }
     entries
 }
@@ -348,5 +359,60 @@ mod tests {
         let entries = project_mail_list(&messages, &rows, &groups, false, now);
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().all(|entry| !entry.is_header && entry.show_row));
+    }
+
+    #[test]
+    fn collapsing_all_recent_sections_keeps_older_mail_in_a_flat_tail() {
+        let now = local_day(2026, 9, 30);
+        let dates = [
+            now.timestamp_millis(),
+            local_day(2026, 9, 29).timestamp_millis(),
+            local_day(2026, 9, 28).timestamp_millis(),
+            local_day(2026, 9, 24).timestamp_millis(),
+            local_day(2026, 9, 1).timestamp_millis(),
+            local_day(2026, 8, 30).timestamp_millis(),
+            local_day(2026, 7, 30).timestamp_millis(),
+            0,
+        ];
+        let mut messages = vec![crate::mail::fixture_messages()[0].clone(); dates.len()];
+        let mut groups = MailGroupState::default();
+        for (index, (message, date)) in messages.iter_mut().zip(dates).enumerate() {
+            message.id = index as i32;
+            message.date_ms = date;
+            // Include stale collapse state for older months as well.
+            let key = mail_group_key(date, now);
+            let (generation, _) = groups.toggle(&key);
+            groups.finish_transition(&key, generation);
+        }
+        let rows = messages
+            .iter()
+            .map(|message| EmailRow {
+                id: message.id,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let entries = project_mail_list(&messages, &rows, &groups, true, now);
+        assert_eq!(entries.len(), 8);
+        assert!(
+            entries[..5]
+                .iter()
+                .all(|entry| entry.is_header && !entry.expanded)
+        );
+        for (index, entry) in entries[5..].iter().enumerate() {
+            assert!(!entry.is_header);
+            assert!(entry.show_row);
+            assert!(!entry.reveal_row);
+            assert!(entry.group_key.is_empty());
+            assert_eq!(entry.email.id, (index + 5) as i32);
+            assert_eq!(entry.email_index, (index + 5) as i32);
+        }
+
+        groups.clear();
+        let expanded = project_mail_list(&messages, &rows, &groups, true, now);
+        assert_eq!(expanded.iter().filter(|entry| entry.is_header).count(), 5);
+        assert_eq!(
+            expanded.iter().filter(|entry| !entry.is_header).count(),
+            dates.len()
+        );
     }
 }

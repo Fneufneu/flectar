@@ -268,7 +268,10 @@ export component MailListPane inherits Rectangle {
     pagination := InfiniteScrollController {
         active: true;
         can-load-more: root.can_load_more; loading: root.loading_more;
-        row-count: root.emails.length; revision: root.content_revision;
+        // A page can add mail only to collapsed groups. Their headers keep the
+        // same geometry, so pagination must track the projected entries rather
+        // than wait for every loaded email to produce a visible row.
+        row-count: root.list_entries.length; revision: root.content_revision;
         content-height: mail-list-scroll.content-height;
         content-y: mail-list-scroll.content-y; visible-height: mail-list-scroll.visible-height;
         prefetch-distance: root.dense ? 132px : 288px;
