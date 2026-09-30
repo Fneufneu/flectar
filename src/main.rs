@@ -264,51 +264,54 @@ fn reconcile_model_rows_by<T: Clone + 'static, K: Eq + std::hash::Hash>(
         return;
     }
 
-    let mut current = model.iter().collect::<Vec<_>>();
+    // Only row identities are needed for reordering. Keeping whole rows here
+    // would deep-clone every retained string and selected body until refresh
+    // completes.
+    let mut current_keys = model.iter().map(|row| key(&row)).collect::<Vec<_>>();
     // Unrelated result sets should reset in one notification. Related sets
     // (new mail inserted, a thread removed, or rows reordered) are edited by
     // id so Slint can keep the visible delegate anchored.
-    let current_ids = current.iter().map(&key).collect::<HashSet<_>>();
+    let current_ids = current_keys.iter().collect::<HashSet<_>>();
     let overlap = rows
         .iter()
         .filter(|row| current_ids.contains(&key(row)))
         .count();
-    if overlap.saturating_mul(2) < current.len().min(rows.len()) {
+    if overlap.saturating_mul(2) < current_keys.len().min(rows.len()) {
         model.set_vec(rows);
         return;
     }
 
     let mut index = 0;
     while index < rows.len() {
-        if index >= current.len() {
+        if index >= current_keys.len() {
             model.extend(rows[index..].iter().cloned());
             break;
         }
-        if key(&current[index]) == key(&rows[index]) {
-            if !same(&current[index], &rows[index]) {
+        if current_keys[index] == key(&rows[index]) {
+            let old = model.row_data(index).expect("index is within row_count");
+            if !same(&old, &rows[index]) {
                 model.set_row_data(index, rows[index].clone());
-                current[index] = rows[index].clone();
             }
             index += 1;
             continue;
         }
-        if let Some(relative) = current[index + 1..]
+        if let Some(relative) = current_keys[index + 1..]
             .iter()
-            .position(|row| key(row) == key(&rows[index]))
+            .position(|old_key| *old_key == key(&rows[index]))
         {
             let found = index + 1 + relative;
             for _ in index..found {
-                current.remove(index);
+                current_keys.remove(index);
                 model.remove(index);
             }
         } else {
-            current.insert(index, rows[index].clone());
+            current_keys.insert(index, key(&rows[index]));
             model.insert(index, rows[index].clone());
         }
     }
-    while current.len() > rows.len() {
-        current.pop();
-        model.remove(current.len());
+    while current_keys.len() > rows.len() {
+        current_keys.pop();
+        model.remove(current_keys.len());
     }
 }
 
@@ -7223,7 +7226,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_model_refresh_does_not_clone_all_retained_rows() {
+    fn unchanged_and_reordered_refreshes_do_not_clone_all_retained_rows() {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -7294,6 +7297,28 @@ mod tests {
         assert!(
             counts.peak.load(Ordering::Relaxed) <= initial_live + 2,
             "refresh should hold only one temporary row clone at a time"
+        );
+
+        let mut reordered = (0..1_000)
+            .map(|id| Row::new(id, &counts))
+            .collect::<Vec<_>>();
+        reordered.swap(0, 1);
+        let initial_live = counts.live.load(Ordering::Relaxed);
+        counts.peak.store(initial_live, Ordering::Relaxed);
+
+        reconcile_model_rows_by(
+            &model,
+            reordered,
+            |row| row.id,
+            |a, b| a.payload == b.payload,
+        );
+
+        assert_eq!(model.row_count(), 1_000);
+        assert_eq!(model.row_data(0).unwrap().id, 1);
+        assert_eq!(model.row_data(1).unwrap().id, 0);
+        assert!(
+            counts.peak.load(Ordering::Relaxed) <= initial_live + 2,
+            "reorder should not clone every retained row payload"
         );
     }
 
