@@ -391,8 +391,7 @@ fn build_filter(
         bind.push(Box::new(cur.thread_id));
         let id_parameter = bind.len();
         where_clauses.push(format!(
-            "(t.last_message_at < ?{timestamp_parameter}
-              OR (t.last_message_at = ?{timestamp_parameter} AND t.id < ?{id_parameter}))"
+            "(t.last_message_at, t.id) < (?{timestamp_parameter}, ?{id_parameter})"
         ));
     }
 
@@ -594,5 +593,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![3, 2, 1]);
         assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn account_keyset_cursor_seeks_the_recent_index() {
+        let conn = crate::db::testutil::conn();
+        crate::db::testutil::seed_account(&conn);
+        for subject in ["one", "two", "three"] {
+            crate::db::testutil::seed_message(&conn, "sender@example.com", subject, false);
+        }
+        let args = ListArgs {
+            view: View::Inbox,
+            tab: None,
+            account_id: Some(1),
+            folder_id: None,
+            cursor: Some(ThreadCursor {
+                last_message_at: i64::MAX,
+                thread_id: i64::MAX,
+            }),
+            limit: 2,
+        };
+        let plan = list_query_plan(&conn, &args).unwrap();
+        assert!(
+            plan.iter().any(|line| {
+                line.contains("idx_threads_recent") && line.contains("last_message_at<?")
+            }),
+            "keyset cursor must seek by account and timestamp: {plan:?}"
+        );
     }
 }
