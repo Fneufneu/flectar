@@ -261,12 +261,34 @@ pub fn parse(body: &str) -> Result<Multistatus> {
     Ok(out)
 }
 
-fn escape(value: &str) -> String {
+fn escaped_len(value: &str) -> usize {
     value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+        .chars()
+        .map(|character| match character {
+            '&' => 5,
+            '<' | '>' => 4,
+            '"' => 6,
+            _ => character.len_utf8(),
+        })
+        .sum()
+}
+
+fn append_escaped(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn escape(value: &str) -> String {
+    let mut output = String::with_capacity(escaped_len(value));
+    append_escaped(&mut output, value);
+    output
 }
 pub fn principal() -> String {
     r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#.into()
