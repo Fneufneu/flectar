@@ -899,8 +899,10 @@ fn replaced_style_runs(
     inserted: &[ComposeStyleRun],
 ) -> Vec<ComposeStyleRun> {
     let inserted_len = inserted.last().map_or(0, |run| run.range.end);
-    let mut styles = Vec::with_capacity(old.len() + inserted.len() + 2);
-    for run in old {
+    let prefix_end = old.partition_point(|run| run.range.start < start);
+    let suffix_start = old.partition_point(|run| run.range.end <= end);
+    let mut styles = Vec::with_capacity(prefix_end + inserted.len() + old.len() - suffix_start);
+    for run in &old[..prefix_end] {
         if run.range.start < start {
             push_style_run(
                 &mut styles,
@@ -916,7 +918,7 @@ fn replaced_style_runs(
             run.style.clone(),
         );
     }
-    for run in old {
+    for run in &old[suffix_start..] {
         if run.range.end > end {
             push_style_run(
                 &mut styles,
@@ -1420,6 +1422,29 @@ mod tests {
         assert_eq!(fragment[0].range, 0..1);
         assert_eq!(fragment[2].range, 2..3);
         assert!(style_fragment(&styles, 900..900).is_empty());
+    }
+
+    #[test]
+    fn replacing_fragmented_styles_does_not_retain_removed_capacity() {
+        let old = (0..1000)
+            .map(|byte| ComposeStyleRun {
+                range: byte..byte + 1,
+                style: CharacterStyle {
+                    marks: if byte % 2 == 0 { BOLD } else { ITALIC },
+                    ..Default::default()
+                },
+            })
+            .collect::<Vec<_>>();
+        let inserted = [ComposeStyleRun {
+            range: 0..1,
+            style: CharacterStyle::default(),
+        }];
+        let result = replaced_style_runs(&old, 0, 1000, &inserted);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.capacity(), 1);
+        assert_eq!(result[0].range, 0..1);
+        let empty = replaced_style_runs(&old, 0, 1000, &[]);
+        assert_eq!(empty.capacity(), 0);
     }
 
     #[test]
