@@ -144,7 +144,12 @@ fn deduplicated_addresses<'a>(
     addresses
         .into_iter()
         .filter(|address| {
-            let email = address.email.trim().to_ascii_lowercase();
+            let email = address.email.trim();
+            let email = if email.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                std::borrow::Cow::Owned(email.to_ascii_lowercase())
+            } else {
+                std::borrow::Cow::Borrowed(email)
+            };
             !email.is_empty()
                 && !own_emails
                     .iter()
