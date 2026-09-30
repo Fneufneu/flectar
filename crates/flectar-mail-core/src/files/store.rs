@@ -3,6 +3,7 @@
 use super::{ConnectionSettings, FileNode};
 use crate::{Core, db::Db, error::Result};
 use rusqlite::{OptionalExtension, params};
+use std::fmt::Write as _;
 
 #[derive(Clone, Debug)]
 pub struct Operation {
@@ -225,7 +226,16 @@ pub async fn finish(db: &Db, id: i64, state: &str, error: Option<String>) -> Res
 pub async fn activity(db: &Db, account: i64) -> Result<String> {
     db.read(move |c| {
         let mut q=c.prepare("SELECT id,action,state,COALESCE(error,'') FROM operations WHERE account_id=?1 ORDER BY id DESC LIMIT 100")?;
-        let rows=q.query_map([account],|r|Ok(format!("#{} · {} · {}\n{}",r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.join("\n\n"))
+        let mut rows = q.query([account])?;
+        let mut activity = String::new();
+        while let Some(row) = rows.next()? {
+            if !activity.is_empty() {
+                activity.push_str("\n\n");
+            }
+            let _ = write!(activity, "#{} · {} · {}\n{}",
+                row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?);
+        }
+        Ok(activity)
     }).await
 }
