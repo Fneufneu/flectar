@@ -93,20 +93,16 @@ pub(super) fn prepare_message_compose(
                 .map(|identity| identity.email.clone())
         })
         .unwrap_or_else(|| source.default_sender_email.clone());
-    let mut candidates = Vec::new();
-    if !own_emails.contains(&source.from.email.trim().to_ascii_lowercase()) {
-        candidates.push(source.from.clone());
-    }
-    candidates.extend(source.to.iter().cloned());
-    if action == "reply_all" {
-        candidates.extend(source.cc.iter().cloned());
-    }
+    let candidates = std::iter::once(&source.from)
+        .filter(|address| !own_emails.contains(&address.email.trim().to_ascii_lowercase()))
+        .chain(source.to.iter())
+        .chain(source.cc.iter().filter(|_| action == "reply_all"));
     let recipients = deduplicated_addresses(candidates, &own_emails);
     let primary = recipients
         .first()
         .ok_or_else(|| "the selected message has no reply recipient".to_owned())?;
     let cc = if action == "reply_all" {
-        join_addresses(&recipients[1..])
+        join_addresses(recipients[1..].iter().copied())
     } else {
         String::new()
     };
@@ -136,10 +132,10 @@ pub(super) fn compose_addresses(addresses: &[flectar_mail_core::models::Address]
     join_addresses(addresses)
 }
 
-fn deduplicated_addresses(
-    addresses: impl IntoIterator<Item = flectar_mail_core::models::Address>,
+fn deduplicated_addresses<'a>(
+    addresses: impl IntoIterator<Item = &'a flectar_mail_core::models::Address>,
     own_emails: &HashSet<String>,
-) -> Vec<flectar_mail_core::models::Address> {
+) -> Vec<&'a flectar_mail_core::models::Address> {
     let mut seen = HashSet::new();
     addresses
         .into_iter()
@@ -150,9 +146,11 @@ fn deduplicated_addresses(
         .collect()
 }
 
-fn join_addresses(addresses: &[flectar_mail_core::models::Address]) -> String {
+fn join_addresses<'a>(
+    addresses: impl IntoIterator<Item = &'a flectar_mail_core::models::Address>,
+) -> String {
     addresses
-        .iter()
+        .into_iter()
         .map(format_address)
         .collect::<Vec<_>>()
         .join(", ")
