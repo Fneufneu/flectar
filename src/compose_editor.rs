@@ -1087,7 +1087,7 @@ mod tests {
             let draw =
                 |surface: &mut CosmicComposeEditor, document: &RichComposeDocument, style| {
                     surface.render(
-                        &document,
+                        document,
                         document.selection(),
                         320.0,
                         120.0,

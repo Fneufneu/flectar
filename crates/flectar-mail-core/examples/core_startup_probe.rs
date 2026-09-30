@@ -239,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             let repeat_search_ms = started.elapsed().as_secs_f64() * 1000.0;
             assert_eq!(search.threads.len(), repeat.threads.len());
-            let next_search_ms = if let Some(cursor) = search.next_cursor.clone() {
+            let next_search_ms = if let Some(cursor) = search.next_cursor {
                 let started = Instant::now();
                 let next = core
                     .search_chronological_page("subject".to_owned(), None, Some(cursor), 25)

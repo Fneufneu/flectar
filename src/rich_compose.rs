@@ -795,25 +795,24 @@ impl RichComposeDocument {
     fn push_key_transaction(&mut self, transaction: EditTransaction, key_text: &str) {
         let eligible = is_ordinary_typing(&transaction, key_text);
         self.redo.clear();
-        if eligible && self.typing_group_active {
-            if let Some(previous) = self.undo.back_mut() {
-                if can_group_typing(previous, &transaction) {
-                    let mut text = String::with_capacity(
-                        previous.after.text.len() + transaction.after.text.len(),
-                    );
-                    text.push_str(&previous.after.text);
-                    text.push_str(&transaction.after.text);
-                    previous.after.text = Arc::from(text);
-                    previous.after.span_len += transaction.after.span_len;
-                    previous.after.styles[0].range.end = previous.after.span_len;
-                    previous.after_typing_style = transaction.after_typing_style;
-                    previous.after_typing_override = transaction.after_typing_override;
-                    previous.after_selection = transaction.after_selection;
-                    previous.retained_bytes = transaction_bytes(&previous.before, &previous.after);
-                    self.trim_history();
-                    return;
-                }
-            }
+        if eligible
+            && self.typing_group_active
+            && let Some(previous) = self.undo.back_mut()
+            && can_group_typing(previous, &transaction)
+        {
+            let mut text =
+                String::with_capacity(previous.after.text.len() + transaction.after.text.len());
+            text.push_str(&previous.after.text);
+            text.push_str(&transaction.after.text);
+            previous.after.text = Arc::from(text);
+            previous.after.span_len += transaction.after.span_len;
+            previous.after.styles[0].range.end = previous.after.span_len;
+            previous.after_typing_style = transaction.after_typing_style;
+            previous.after_typing_override = transaction.after_typing_override;
+            previous.after_selection = transaction.after_selection;
+            previous.retained_bytes = transaction_bytes(&previous.before, &previous.after);
+            self.trim_history();
+            return;
         }
         self.typing_group_active = eligible;
         self.undo.push_back(transaction);
@@ -1055,10 +1054,10 @@ fn fragment_text_bytes(text: &Arc<str>) -> usize {
 }
 
 fn count_style_links(style: &CharacterStyle, seen: &mut HashSet<usize>, bytes: &mut usize) {
-    if let Some(link) = &style.link {
-        if seen.insert(Arc::as_ptr(link) as *const u8 as usize) {
-            *bytes += fragment_text_bytes(link);
-        }
+    if let Some(link) = &style.link
+        && seen.insert(Arc::as_ptr(link) as *const u8 as usize)
+    {
+        *bytes += fragment_text_bytes(link);
     }
 }
 
@@ -1402,9 +1401,11 @@ mod tests {
 
     #[test]
     fn normalizing_styles_reuses_vector_storage() {
-        let mut document = RichComposeDocument::default();
-        document.text = "é界xy".into();
-        document.styles = Vec::with_capacity(20);
+        let mut document = RichComposeDocument {
+            text: "é界xy".into(),
+            styles: Vec::with_capacity(20),
+            ..RichComposeDocument::default()
+        };
         for range in [0..2, 2..5, 5..6, 6..7] {
             document.styles.push(ComposeStyleRun {
                 range,

@@ -219,7 +219,7 @@ pub fn parse(body: &str) -> Result<Multistatus> {
                     }
                     "current-user-principal" | "addressbook-home-set" => href_target = None,
                     "status" => {
-                        let code = status(&value);
+                        let code = status(value);
                         if path.last().is_some_and(|v| v == "response") {
                             direct_status = Some(code);
                         } else if path.iter().any(|part| part == "propstat") {

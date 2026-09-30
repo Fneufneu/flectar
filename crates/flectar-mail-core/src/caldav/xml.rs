@@ -192,7 +192,7 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
                     }
                     "current-user-principal" | "calendar-home-set" => href_target = None,
                     "status" => {
-                        let code = parse_status_line(&value);
+                        let code = parse_status_line(value);
                         // <status> directly under <response> is the item's
                         // status (sync-collection 404s); under <propstat> it
                         // qualifies the props.

@@ -272,7 +272,7 @@ fn parse_vtimezones(lines: &[Cow<'_, str>]) -> HashMap<String, Vec<TzObservance>
                 in_sub = false;
             }
             "TZOFFSETTO" if in_sub => {
-                if let (Some(c), Some(off)) = (cur.as_mut(), parse_offset(&value)) {
+                if let (Some(c), Some(off)) = (cur.as_mut(), parse_offset(value)) {
                     c.offset_to = off;
                 }
             }
@@ -462,7 +462,7 @@ pub fn parse_ics(text: &str) -> Vec<IcsEvent> {
                     "SEQUENCE" => ev.sequence = value.trim().parse().unwrap_or(0),
                     "RRULE" => ev.rrule = Some(value.trim().to_string()),
                     "RECURRENCE-ID" => {
-                        ev.recurrence_id_ms = parse_dt(&value).map(|(ms, _)| ms);
+                        ev.recurrence_id_ms = parse_dt(value).map(|(ms, _)| ms);
                     }
                     "EXDATE" => {
                         // Collected by the recurrence expander from the raw
@@ -492,7 +492,7 @@ pub fn parse_ics(text: &str) -> Vec<IcsEvent> {
                     }
                     "DTSTART" => {
                         let tzid = param(&params, "TZID");
-                        if let Some((ms, all_day)) = resolve_dt(&value, tzid, &tztable) {
+                        if let Some((ms, all_day)) = resolve_dt(value, tzid, &tztable) {
                             ev.starts_at_ms = ms;
                             ev.all_day = all_day;
                         }
@@ -502,7 +502,7 @@ pub fn parse_ics(text: &str) -> Vec<IcsEvent> {
                     }
                     "DTEND" => {
                         let tzid = param(&params, "TZID");
-                        if let Some((ms, _)) = resolve_dt(&value, tzid, &tztable) {
+                        if let Some((ms, _)) = resolve_dt(value, tzid, &tztable) {
                             ev.ends_at_ms = Some(ms);
                         }
                     }
