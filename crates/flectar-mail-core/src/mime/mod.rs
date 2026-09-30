@@ -1114,8 +1114,7 @@ struct HtmlDocumentSection<'a> {
 /// string substitution. Tag ends honor quoted attribute values, and ASCII
 /// case-folding preserves byte offsets into the original UTF-8 source.
 fn html_document_section<'a>(html: &'a str, tag: &str) -> Option<HtmlDocumentSection<'a>> {
-    let lower = html.to_ascii_lowercase();
-    let open_start = find_html_tag(&lower, tag, 0, false)?;
+    let open_start = find_html_tag(html, tag, 0, false)?;
     let open_end = html_tag_end(html, open_start)?;
     let name_end = open_start + 1 + tag.len();
     let attributes = html.get(name_end..open_end)?;
@@ -1123,7 +1122,7 @@ fn html_document_section<'a>(html: &'a str, tag: &str) -> Option<HtmlDocumentSec
     // The html element normally encloses the whole document and its explicit
     // closing tag is optional. Its content is not used by the caller, but the
     // same representation keeps attribute extraction consistent.
-    let close_start = find_html_tag(&lower, tag, open_end + 1, true).unwrap_or(html.len());
+    let close_start = find_html_tag(html, tag, open_end + 1, true).unwrap_or(html.len());
     let content = html.get(open_end + 1..close_start)?;
     Some(HtmlDocumentSection {
         attributes,
@@ -1131,20 +1130,26 @@ fn html_document_section<'a>(html: &'a str, tag: &str) -> Option<HtmlDocumentSec
     })
 }
 
-fn find_html_tag(lower: &str, tag: &str, from: usize, closing: bool) -> Option<usize> {
-    let prefix = if closing {
-        format!("</{tag}")
-    } else {
-        format!("<{tag}")
-    };
+fn find_html_tag(html: &str, tag: &str, from: usize, closing: bool) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let name_offset = if closing { 2 } else { 1 };
     let mut cursor = from;
-    while let Some(relative) = lower.get(cursor..)?.find(&prefix) {
+    while let Some(relative) = bytes.get(cursor..)?.iter().position(|&byte| byte == b'<') {
         let start = cursor + relative;
-        let boundary = lower.as_bytes().get(start + prefix.len()).copied();
-        if boundary.is_none_or(|byte| byte == b'>' || byte == b'/' || byte.is_ascii_whitespace()) {
+        let name_start = start + name_offset;
+        let name_end = name_start.checked_add(tag.len())?;
+        let closing_matches = !closing || bytes.get(start + 1) == Some(&b'/');
+        if closing_matches
+            && bytes
+                .get(name_start..name_end)
+                .is_some_and(|name| name.eq_ignore_ascii_case(tag.as_bytes()))
+            && bytes
+                .get(name_end)
+                .is_none_or(|byte| *byte == b'>' || *byte == b'/' || byte.is_ascii_whitespace())
+        {
             return Some(start);
         }
-        cursor = start + prefix.len();
+        cursor = start + 1;
     }
     None
 }
@@ -2393,6 +2398,26 @@ mod tests {
         assert!(!cleaned.contains("<script"), "cleaned: {cleaned}");
         assert!(!cleaned.contains("alert(1)"), "cleaned: {cleaned}");
         assert!(cleaned.contains("<p>Mail</p>"), "cleaned: {cleaned}");
+    }
+
+    #[test]
+    fn document_tag_scan_preserves_case_boundaries_and_quoted_angles() {
+        let html = "é界<HTML class='a'><HEAD><TITLE>x</TITLE></HEAD><bodyguard>skip</bodyguard><BoDy data-test='>'>👩‍🚀</bOdY></HTML>";
+        let body = html_document_section(html, "body").unwrap();
+        assert_eq!(body.attributes, " data-test='>'");
+        assert_eq!(body.content, "👩‍🚀");
+        assert_eq!(
+            html_document_section(html, "head").unwrap().content,
+            "<TITLE>x</TITLE>"
+        );
+        assert!(html_document_section("<bodyguard>x</bodyguard>", "body").is_none());
+        assert_eq!(
+            html_document_section("<BODY>unterminated é", "body")
+                .unwrap()
+                .content,
+            "unterminated é"
+        );
+        assert!(find_html_tag("é<body>x</body>", "body", 1, false).is_some());
     }
 
     #[test]
