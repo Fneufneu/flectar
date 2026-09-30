@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
+import math
 import json
 import os
 import platform
@@ -28,6 +30,62 @@ startup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(startup)
 
 
+def profile_fingerprint(source: Path | None) -> str:
+    """Hash fixture bytes and relative names without recording private paths."""
+    if source is None:
+        return "empty"
+    digest = hashlib.sha256()
+    for path in sorted(source.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("fixture fingerprints require a tree without symlinks")
+        if path.is_file():
+            relative = path.relative_to(source).as_posix().encode()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(bytes.fromhex(startup.file_sha256(path)))
+    return digest.hexdigest()
+
+
+def sample_resources(process, duration: float, interval: float | None) -> list[dict]:
+    """Timed procfs samples; observed peaks are lower bounds, not frame events."""
+    started = time.monotonic()
+    samples = []
+    index = 1
+    while True:
+        target = duration if interval is None else min(index * interval, duration)
+        time.sleep(max(0.0, started + target - time.monotonic()))
+        if process.poll() is not None:
+            raise RuntimeError(f"application exited before sample: {process.returncode}")
+        resources = startup.read_proc_resources(process.pid)
+        samples.append({"elapsed_seconds": time.monotonic() - started, "resources": resources})
+        if target >= duration:
+            return samples
+        index += 1
+
+
+def load_artifact_manifest(path: Path | None, binary_hash: str) -> dict | None:
+    if path is None:
+        return None
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("artifact manifest must be a JSON object")
+    if data.get("binary_sha256") != binary_hash:
+        raise ValueError("artifact manifest does not match executable SHA-256")
+    commit = data.get("source_commit")
+    if not isinstance(commit, str) or len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        raise ValueError("artifact manifest requires a full source_commit hash")
+    features = data.get("build_features")
+    if not isinstance(features, list) or any(not isinstance(value, str) or not value for value in features):
+        raise ValueError("artifact manifest requires a build_features list")
+    provenance = {}
+    for key in ("build_profile", "rust_version", "slint_version", "profile_settings"):
+        value = data.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"artifact manifest requires {key}")
+        provenance[key] = value
+    return {"binary_sha256": binary_hash, "source_commit": commit, "build_features": sorted(set(features)), **provenance}
+
+
 def run_once(
     binary: Path,
     sample_seconds: float,
@@ -35,6 +93,7 @@ def run_once(
     include_thread_stacks: bool,
     profile_data: Path | None,
     profile_cache: Path | None,
+    sample_interval: float | None = None,
 ) -> dict:
     with tempfile.TemporaryDirectory(prefix="flectar-normal-startup-") as temporary:
         root = Path(temporary)
@@ -65,10 +124,8 @@ def run_once(
             )
             try:
                 started = time.monotonic()
-                time.sleep(sample_seconds)
-                if process.poll() is not None:
-                    raise RuntimeError(f"application exited before sample: {process.returncode}")
-                resources = startup.read_proc_resources(process.pid)
+                samples = sample_resources(process, sample_seconds, sample_interval)
+                resources = samples[-1]["resources"]
                 mappings = (
                     startup.read_proc_mappings(
                         process.pid, startup.runtime_executable(process.pid)
@@ -102,6 +159,11 @@ def run_once(
 
         result = {
             "idle": resources,
+            "resource_samples": samples,
+            "sampled_peak": {
+                name: max(sample["resources"][name] for sample in samples)
+                for name in ("rss_kib", "pss_kib", "swap_kib", "swap_pss_kib")
+            },
             "sampled_after_seconds": sampled_after,
             "renderer_selected": renderer,
         }
@@ -200,6 +262,11 @@ def main() -> None:
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--sample-seconds", type=float, default=5.5)
+    parser.add_argument("--sample-interval", type=float, help="Optional procfs sampling interval; sampled peaks are lower bounds.")
+    parser.add_argument("--artifact-manifest", type=Path, help="Build record: SHA-256, source commit, features, profile/settings, Rust and Slint versions.")
+    parser.add_argument("--window-width", type=int, help="Observed logical window width, recorded as declared context.")
+    parser.add_argument("--window-height", type=int, help="Observed logical window height, recorded as declared context.")
+    parser.add_argument("--scale", type=float, help="Observed display scale, recorded as declared context.")
     parser.add_argument("--profile-data-dir", type=Path)
     parser.add_argument("--profile-cache-dir", type=Path)
     parser.add_argument("--include-mappings", action="store_true")
@@ -208,8 +275,13 @@ def main() -> None:
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("this benchmark requires Linux /proc")
-    if args.rounds < 1 or args.sample_seconds <= 0:
-        parser.error("rounds and sample seconds must be positive")
+    if args.rounds < 1 or not math.isfinite(args.sample_seconds) or args.sample_seconds <= 0:
+        parser.error("rounds and sample seconds must be positive and finite")
+    if args.sample_interval is not None and (not math.isfinite(args.sample_interval) or args.sample_interval <= 0 or args.sample_interval > args.sample_seconds):
+        parser.error("sample interval must be positive, finite and no longer than the sample duration")
+    geometry = (args.window_width, args.window_height, args.scale)
+    if any(value is not None for value in geometry) and (any(value is None for value in geometry) or args.window_width <= 0 or args.window_height <= 0 or not math.isfinite(args.scale) or args.scale <= 0):
+        parser.error("supply positive width, height and finite scale together")
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         parser.error("a display is required")
     binary = args.binary.resolve()
@@ -222,6 +294,12 @@ def main() -> None:
         if path is not None and not path.is_dir():
             parser.error(f"{name} directory does not exist: {path}")
 
+    binary_hash = startup.file_sha256(binary)
+    try:
+        artifact = load_artifact_manifest(args.artifact_manifest, binary_hash)
+        fixture = {"data": profile_fingerprint(args.profile_data_dir), "cache": profile_fingerprint(args.profile_cache_dir)}
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     runs = []
     for index in range(args.rounds):
         run = run_once(
@@ -231,6 +309,7 @@ def main() -> None:
             args.include_thread_stacks,
             args.profile_data_dir,
             args.profile_cache_dir,
+            args.sample_interval,
         )
         run["round"] = index + 1
         runs.append(run)
@@ -239,13 +318,19 @@ def main() -> None:
             f"pss_kib={run['idle']['pss_kib']}",
             flush=True,
         )
+    if startup.file_sha256(binary) != binary_hash:
+        raise RuntimeError("executable changed during benchmark; results rejected")
+    if fixture != {"data": profile_fingerprint(args.profile_data_dir), "cache": profile_fingerprint(args.profile_cache_dir)}:
+        raise RuntimeError("source fixture changed during benchmark; results rejected")
     names = sorted({name for run in runs for name in run["idle"]})
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "identity": {
             "binary": str(binary),
-            "binary_sha256": startup.file_sha256(binary),
+            "binary_sha256": binary_hash,
+            "artifact": artifact,
+            "git_commit_scope": "workspace_at_measurement",
             "git_commit": startup.command_output("git", "rev-parse", "HEAD"),
             "platform": platform.platform(),
             "display": os.environ.get("DISPLAY"),
@@ -254,6 +339,9 @@ def main() -> None:
         "configuration": {
             "rounds": args.rounds,
             "sample_seconds": args.sample_seconds,
+            "sample_interval": args.sample_interval,
+            "fixture_fingerprints": fixture,
+            "declared_window": {"width": args.window_width, "height": args.window_height, "scale": args.scale},
             "include_mappings": args.include_mappings,
             "include_thread_stacks": args.include_thread_stacks,
             "forced_snapshots": False,
@@ -262,6 +350,11 @@ def main() -> None:
             "profile_cache_supplied": args.profile_cache_dir is not None,
         },
         "summary": {
+            "sampled_peaks_are_lower_bounds": True,
+            "median_sampled_peak": {
+                name: statistics.median(run["sampled_peak"][name] for run in runs)
+                for name in ("rss_kib", "pss_kib", "swap_kib", "swap_pss_kib")
+            },
             "median_idle": {
                 name: statistics.median(run["idle"][name] for run in runs)
                 for name in names
