@@ -1551,8 +1551,7 @@ pub fn robot_sender(email: &str) -> bool {
         .unwrap_or("")
         .split('+')
         .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+        .unwrap_or("");
     const PREFIXES: &[&str] = &[
         "noreply",
         "no-reply",
@@ -1568,7 +1567,12 @@ pub fn robot_sender(email: &str) -> bool {
         "bounce",
         "microsoftexchange",
     ];
-    PREFIXES.iter().any(|p| local.starts_with(p))
+    PREFIXES.iter().any(|prefix| {
+        local
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
+    })
 }
 
 /// Raw (unparsed) header value with folding whitespace collapsed, or None when
@@ -1797,8 +1801,9 @@ fn parse_headers(msg: &mail_parser::Message) -> ParsedHeaders {
             .header("Precedence")
             .and_then(|h| h.as_text())
             .map(|v| {
-                let v = v.to_ascii_lowercase();
-                v == "bulk" || v == "list" || v == "junk"
+                ["bulk", "list", "junk"]
+                    .iter()
+                    .any(|kind| v.eq_ignore_ascii_case(kind))
             })
             .unwrap_or(false)
         || msg
@@ -2204,6 +2209,26 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automated_sender_prefixes_preserve_case_tags_and_utf8() {
+        for email in [
+            "NoReply+ticket@example.com",
+            "MAILER-DAEMON@example.com",
+            "ALERTé@example.com",
+        ] {
+            assert!(robot_sender(email), "{email}");
+        }
+        for email in [
+            "éalert@example.com",
+            "alice+NOREPLY@example.com",
+            "no@example.com",
+        ] {
+            assert!(!robot_sender(email), "{email}");
+        }
+        let raw = b"From: alice@example.com\r\nPrecedence: BuLk\r\n\r\nbody";
+        assert!(parse_message(raw).unwrap().headers.is_automated);
+    }
 
     #[test]
     fn aligned_sender_falls_through_to_misaligned_transmitter() {
