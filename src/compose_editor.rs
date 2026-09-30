@@ -547,6 +547,17 @@ impl CosmicComposeEditor {
                     if run.line_i < start.line || run.line_i > end.line {
                         continue;
                     }
+                    // A logical paragraph can wrap over many raster tiles.
+                    // Follow Cosmic Text's selected-glyph predicate so runs
+                    // outside the selected byte range retain their pixels.
+                    let selected_glyph = run.glyphs.iter().any(|glyph| {
+                        (start.line != run.line_i || glyph.end > start.index)
+                            && (end.line != run.line_i || glyph.start < end.index)
+                    });
+                    let selected_empty_line = run.glyphs.is_empty() && end.line > run.line_i;
+                    if !selected_glyph && !selected_empty_line {
+                        continue;
+                    }
                     let top = run.line_top;
                     let bottom = run.line_top + run.line_height;
                     *extent = Some(match *extent {
@@ -1298,11 +1309,11 @@ mod tests {
             selection: Color::from_argb_u8(140, 60, 120, 220),
             selected_text: Color::from_rgb_u8(255, 255, 255),
         };
-        for scale in [1.0, 2.0] {
+        for scale in [1.0, 1.5, 2.0] {
             let mut document = RichComposeDocument::default();
             document.synchronize(&text, 0, 0);
             let mut surface = CosmicComposeEditor::default();
-            surface.render(
+            let initial = surface.render(
                 &document,
                 document.selection(),
                 280.0,
@@ -1312,14 +1323,29 @@ mod tests {
                 style,
                 "",
             );
-            let selection = document.update_selection(1500, 1600);
+            let selection = document.update_selection(1300, 1330);
             let updated =
                 surface.render(&document, selection, 280.0, 600.0, 350.0, scale, style, "");
             let mut fresh = CosmicComposeEditor::default();
             let expected =
                 fresh.render(&document, selection, 280.0, 600.0, 350.0, scale, style, "");
             assert_eq!(updated.tiles.len(), expected.tiles.len());
-            for (after, full) in updated.tiles.iter().zip(&expected.tiles) {
+            let mut preserved = 0;
+            let mut repainted = 0;
+            for ((before, after), full) in initial
+                .tiles
+                .iter()
+                .zip(&updated.tiles)
+                .zip(&expected.tiles)
+            {
+                if std::ptr::eq(
+                    before.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    after.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                ) {
+                    preserved += 1;
+                } else {
+                    repainted += 1;
+                }
                 assert_eq!(after.y, full.y);
                 assert_eq!(
                     after.image.to_rgba8_premultiplied().unwrap().as_bytes(),
@@ -1328,6 +1354,12 @@ mod tests {
                     after.y
                 );
             }
+            assert!(
+                preserved > 0,
+                "scale={scale}: wrapping repainted every tile"
+            );
+            assert!(repainted > 0, "scale={scale}: selection failed to repaint");
+            println!("wrapped selection scale={scale} preserved={preserved} repainted={repainted}");
         }
     }
 
