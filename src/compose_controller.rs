@@ -110,12 +110,25 @@ pub(super) fn prepare_message_compose(
     } else {
         String::new()
     };
-    let quoted = original_body
-        .trim_end()
+    let text = original_body.trim_end();
+    let quoted_len = text
         .lines()
-        .map(|line| format!("> {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|line| line.len() + 3)
+        .sum::<usize>()
+        .saturating_sub(usize::from(!text.is_empty()));
+    let mut body = String::with_capacity(
+        "\n\nOn ,  wrote:\n".len() + sent_at.len() + sender.len() + quoted_len,
+    );
+    for part in ["\n\nOn ", &sent_at, ", ", &sender, " wrote:\n"] {
+        body.push_str(part);
+    }
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            body.push('\n');
+        }
+        body.push_str("> ");
+        body.push_str(line);
+    }
 
     Ok(PreparedMessageCompose {
         account_id: source.account_id,
@@ -123,7 +136,7 @@ pub(super) fn prepare_message_compose(
         to: format_address(primary),
         cc,
         subject: prefixed_subject(&source.subject, "Re"),
-        body: format!("\n\nOn {sent_at}, {sender} wrote:\n{quoted}"),
+        body,
         intent: ComposeIntent {
             mode: action.to_owned(),
             in_reply_to_message_id: Some(source.message_id),
