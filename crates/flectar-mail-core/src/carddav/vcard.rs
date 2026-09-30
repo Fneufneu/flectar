@@ -333,11 +333,33 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
             .unwrap_or(head)
             .rsplit('.')
             .next()
-            .unwrap_or(head)
-            .to_ascii_uppercase();
+            .unwrap_or(head);
+        let Some(name) = [
+            "FN",
+            "N",
+            "EMAIL",
+            "TEL",
+            "ORG",
+            "TITLE",
+            "URL",
+            "BDAY",
+            "ADR",
+            "NOTE",
+            "CATEGORIES",
+        ]
+        .into_iter()
+        .find(|candidate| name.eq_ignore_ascii_case(candidate)) else {
+            continue;
+        };
+        if (name == "N" && !record.name.is_empty())
+            || (name == "TEL" && !record.phone.is_empty())
+            || (name == "URL" && !record.website.is_empty())
+        {
+            continue;
+        }
         let decoded = decoded_value(head, raw);
         let value = unescape(&decoded).trim().to_owned();
-        match name.as_str() {
+        match name {
             "FN" => record.name = value,
             "N" if record.name.is_empty() => {
                 let parts = split_escaped(decoded.trim(), ';');
