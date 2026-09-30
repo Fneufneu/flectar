@@ -169,8 +169,9 @@ impl CosmicComposeEditor {
         style: ComposeEditorStyle,
         preedit_text: &str,
     ) -> RenderedComposeEditor {
+        let timing_start = crate::renderer::render_timings_enabled().then(Instant::now);
         let scale_factor = scale_factor.max(1.0);
-        self.ensure_layout(
+        let relaid_out = self.ensure_layout(
             document,
             selection,
             logical_width,
@@ -195,6 +196,8 @@ impl CosmicComposeEditor {
             .map_or(1, |layout| layout.physical_width.max(1));
         let tile_height_physical = (TILE_HEIGHT_LOGICAL * scale_factor).ceil().max(1.0) as u32;
         let content_height_physical = self.content_height_physical.ceil().max(1.0) as u32;
+        let mut new_tiles = 0;
+        let mut paint_time = Duration::ZERO;
         for index in wanted {
             if self.tiles.contains_key(&index) {
                 continue;
@@ -204,7 +207,12 @@ impl CosmicComposeEditor {
                 continue;
             }
             let tile_height = tile_height_physical.min(content_height_physical - tile_start);
+            let paint_start = timing_start.map(|_| Instant::now());
             let image = self.render_tile(physical_width, tile_start, tile_height, style);
+            if let Some(paint_start) = paint_start {
+                paint_time += paint_start.elapsed();
+            }
+            new_tiles += 1;
             self.tiles.insert(
                 index,
                 RenderedComposeTile {
@@ -215,13 +223,31 @@ impl CosmicComposeEditor {
             );
         }
 
-        RenderedComposeEditor {
+        let rendered = RenderedComposeEditor {
             tiles: self.tiles.values().cloned().collect(),
             content_height: self.content_height_physical / scale_factor,
             caret_x,
             caret_y,
             caret_height,
+        };
+        if let Some(timing_start) = timing_start {
+            let tile_bytes = self
+                .tiles
+                .values()
+                .map(|tile| {
+                    let size = tile.image.size();
+                    u64::from(size.width) * u64::from(size.height) * 4
+                })
+                .sum::<u64>();
+            eprintln!(
+                "compose cpu frame: total={:.2}ms layout={} new_tiles={new_tiles} paint={:.2}ms retained_tiles={} retained_tile_bytes={tile_bytes}",
+                timing_start.elapsed().as_secs_f64() * 1000.0,
+                u8::from(relaid_out),
+                paint_time.as_secs_f64() * 1000.0,
+                self.tiles.len(),
+            );
         }
+        rendered
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -370,7 +396,7 @@ impl CosmicComposeEditor {
         scale_factor: f32,
         style: ComposeEditorStyle,
         preedit_text: &str,
-    ) {
+    ) -> bool {
         let physical_width = (logical_width.max(1.0) * scale_factor).ceil().max(1.0) as u32;
         let key = LayoutKey {
             revision: document.revision(),
@@ -384,7 +410,7 @@ impl CosmicComposeEditor {
             && self.layout_preedit_text == preedit_text
             && (preedit_text.is_empty() || self.layout_preedit_offset == preedit_offset)
         {
-            return;
+            return false;
         }
 
         let metrics = Metrics::new(
@@ -439,6 +465,7 @@ impl CosmicComposeEditor {
         self.layout_preedit_offset = preedit_offset;
         self.rendered_selection = None;
         self.tiles.clear();
+        true
     }
 
     fn set_selection(&mut self, selection: ComposeSelection) {

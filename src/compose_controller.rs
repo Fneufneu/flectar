@@ -322,21 +322,29 @@ pub(super) fn apply_compose_editor_surface(
 }
 
 pub(super) fn apply_rendered_compose_editor(app: &AppWindow, rendered: RenderedComposeEditor) {
-    app.set_compose_editor_tiles(ModelRc::new(VecModel::from(
-        rendered
-            .tiles
-            .into_iter()
-            .map(|tile| ComposeEditorTile {
-                image: tile.image,
-                y: tile.y,
-                height: tile.height,
-            })
-            .collect::<Vec<_>>(),
-    )));
+    let started = crate::renderer::render_timings_enabled().then(std::time::Instant::now);
+    let tiles = rendered
+        .tiles
+        .into_iter()
+        .map(|tile| ComposeEditorTile {
+            image: tile.image,
+            y: tile.y,
+            height: tile.height,
+        })
+        .collect::<Vec<_>>();
+    let tile_count = tiles.len();
+    app.set_compose_editor_tiles(ModelRc::new(VecModel::from(tiles)));
+    let replaced_model = true;
     app.set_compose_editor_content_height(rendered.content_height);
     app.set_compose_editor_caret_x(rendered.caret_x);
     app.set_compose_editor_caret_y(rendered.caret_y);
     app.set_compose_editor_caret_height(rendered.caret_height);
+    if let Some(started) = started {
+        eprintln!(
+            "compose Slint model update: {:.2}ms tiles={tile_count} replaced_model={replaced_model}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 pub(super) fn compose_editor_style(app: &AppWindow) -> ComposeEditorStyle {
