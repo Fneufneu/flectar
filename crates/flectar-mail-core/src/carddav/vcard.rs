@@ -492,19 +492,16 @@ pub fn update(existing: &str, record: &ContactRecord, fallback_uid: &str) -> Str
         .filter(|value| !value.is_empty())
         .unwrap_or(fallback_uid);
 
-    let email_indexes = old
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            property_name(line).is_some_and(|name| name.eq_ignore_ascii_case("EMAIL"))
-        })
-        .map(|(index, line)| (index, line.to_ascii_uppercase().contains("PREF")))
-        .collect::<Vec<_>>();
-    let primary_email = email_indexes
-        .iter()
-        .find(|(_, preferred)| *preferred)
-        .or_else(|| email_indexes.first())
-        .map(|(index, _)| *index);
+    let mut primary_email = None;
+    for (index, line) in old.iter().enumerate().filter(|(_, line)| {
+        property_name(line).is_some_and(|name| name.eq_ignore_ascii_case("EMAIL"))
+    }) {
+        primary_email.get_or_insert(index);
+        if contains_ascii_case(line, "PREF") {
+            primary_email = Some(index);
+            break;
+        }
+    }
     let first_tel = old
         .iter()
         .position(|line| property_name(line).is_some_and(|name| name.eq_ignore_ascii_case("TEL")));
