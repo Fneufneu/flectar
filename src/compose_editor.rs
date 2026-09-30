@@ -73,6 +73,7 @@ pub struct CosmicComposeEditor {
     swash_cache: SwashCache,
     editor: Editor<'static>,
     layout_key: Option<LayoutKey>,
+    paint_colors: Option<(u32, u32)>,
     layout_preedit_text: String,
     layout_preedit_offset: usize,
     visual_text: String,
@@ -131,6 +132,7 @@ impl Default for CosmicComposeEditor {
             swash_cache: SwashCache::new(),
             editor: Editor::new(buffer),
             layout_key: None,
+            paint_colors: None,
             layout_preedit_text: String::new(),
             layout_preedit_offset: 0,
             visual_text: String::new(),
@@ -147,6 +149,7 @@ impl Default for CosmicComposeEditor {
 impl CosmicComposeEditor {
     pub fn reset(&mut self) {
         self.layout_key = None;
+        self.paint_colors = None;
         self.layout_preedit_text.clear();
         self.layout_preedit_offset = 0;
         self.visual_text.clear();
@@ -179,6 +182,20 @@ impl CosmicComposeEditor {
             style,
             preedit_text,
         );
+        let paint_colors = (
+            style.selection.as_argb_encoded(),
+            style.selected_text.as_argb_encoded(),
+        );
+        if self.paint_colors != Some(paint_colors) {
+            let selection_painted = self
+                .rendered_selection
+                .is_some_and(|(start, end)| start != end)
+                || selection.start != selection.end;
+            if selection_painted {
+                self.tiles.clear();
+            }
+            self.paint_colors = Some(paint_colors);
+        }
         self.set_selection(selection);
         self.editor.shape_as_needed(&mut self.font_system, false);
 
@@ -1044,6 +1061,95 @@ mod tests {
         let mut pixel = [0, 0, 0, 0];
         blend_premultiplied(&mut pixel, CosmicColor::rgba(200, 100, 50, 128));
         assert_eq!(pixel, [100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn selection_color_changes_repaint_without_relayout() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize("selected phrase and more", 0, 15);
+        let base = ComposeEditorStyle {
+            text: Color::from_rgb_u8(30, 30, 30),
+            link: Color::from_rgb_u8(0, 90, 180),
+            selection: Color::from_argb_u8(140, 60, 120, 220),
+            selected_text: Color::from_rgb_u8(255, 255, 255),
+        };
+        for scale in [1.0, 1.5, 2.0] {
+            let mut surface = CosmicComposeEditor::default();
+            let draw =
+                |surface: &mut CosmicComposeEditor, document: &RichComposeDocument, style| {
+                    surface.render(
+                        &document,
+                        document.selection(),
+                        320.0,
+                        120.0,
+                        0.0,
+                        scale,
+                        style,
+                        "",
+                    )
+                };
+            let initial = draw(&mut surface, &document, base);
+            let original_layout = surface.layout_key;
+            let highlight = ComposeEditorStyle {
+                selection: Color::from_argb_u8(140, 220, 70, 40),
+                ..base
+            };
+            assert!(!surface.ensure_layout(
+                &document,
+                document.selection(),
+                320.0,
+                scale,
+                highlight,
+                "",
+            ));
+            let highlighted = draw(&mut surface, &document, highlight);
+            let expected = draw(&mut CosmicComposeEditor::default(), &document, highlight);
+            let pixels = |frame: &RenderedComposeEditor| {
+                frame.tiles[0]
+                    .image
+                    .to_rgba8_premultiplied()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+            };
+            assert_eq!(surface.layout_key, original_layout);
+            assert_ne!(pixels(&initial), pixels(&highlighted));
+            assert_eq!(pixels(&highlighted), pixels(&expected));
+
+            let selected_text = ComposeEditorStyle {
+                selected_text: Color::from_rgb_u8(20, 220, 20),
+                ..highlight
+            };
+            assert!(!surface.ensure_layout(
+                &document,
+                document.selection(),
+                320.0,
+                scale,
+                selected_text,
+                "",
+            ));
+            let recolored = draw(&mut surface, &document, selected_text);
+            let expected = draw(
+                &mut CosmicComposeEditor::default(),
+                &document,
+                selected_text,
+            );
+            assert_eq!(surface.layout_key, original_layout);
+            assert_ne!(pixels(&highlighted), pixels(&recolored));
+            assert_eq!(pixels(&recolored), pixels(&expected));
+
+            document.update_selection(15, 15);
+            let collapsed = draw(&mut surface, &document, selected_text);
+            let backing = collapsed.tiles[0].image.to_rgba8_premultiplied().unwrap();
+            let no_selection = draw(&mut surface, &document, base);
+            let unchanged = no_selection.tiles[0]
+                .image
+                .to_rgba8_premultiplied()
+                .unwrap();
+            assert!(std::ptr::eq(backing.as_bytes(), unchanged.as_bytes()));
+            assert_eq!(surface.layout_key, original_layout);
+            document.update_selection(0, 15);
+        }
     }
 
     #[test]
