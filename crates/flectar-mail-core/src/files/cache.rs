@@ -168,8 +168,9 @@ pub(crate) async fn sweep(core: &Core, account: i64) -> Result<()> {
         Err(e) => return Err(e.into()),
     };
     while let Some(entry) = entries.next_entry().await? {
-        let key = entry.file_name().to_string_lossy().into_owned();
-        if safe_key(&key) && !keys.contains(&key) && entry.file_type().await?.is_file() {
+        let name = entry.file_name();
+        let key = name.to_string_lossy();
+        if safe_key(&key) && !keys.contains(key.as_ref()) && entry.file_type().await?.is_file() {
             tokio::fs::remove_file(entry.path()).await?;
         }
     }
