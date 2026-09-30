@@ -192,12 +192,12 @@ fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
 pub fn plan_bodystructure(bs: &async_imap::imap_proto::BodyStructure<'_>) -> MimePlan {
     use async_imap::imap_proto::{BodyContentCommon, BodyContentSinglePart, BodyStructure};
 
-    fn param(params: &async_imap::imap_proto::BodyParams<'_>, key: &str) -> Option<String> {
+    fn param<'a>(params: &'a async_imap::imap_proto::BodyParams<'_>, key: &str) -> Option<&'a str> {
         params.as_ref().and_then(|items| {
             items
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case(key))
-                .map(|(_, value)| value.to_string())
+                .map(|(_, value)| value.as_ref())
         })
     }
 
@@ -236,13 +236,14 @@ pub fn plan_bodystructure(bs: &async_imap::imap_proto::BodyStructure<'_>) -> Mim
         plan: &mut MimePlan,
     ) {
         let section = section(path);
-        let mime_type = format!("{}/{}", common.ty.ty, common.ty.subtype).to_ascii_lowercase();
+        let mut mime_type = format!("{}/{}", common.ty.ty, common.ty.subtype);
+        mime_type.make_ascii_lowercase();
         let filename = common
             .disposition
             .as_ref()
             .and_then(|value| param(&value.params, "filename"))
             .or_else(|| param(&common.ty.params, "name"))
-            .map(|name| decode_encoded_words(&name));
+            .map(decode_encoded_words);
         let disposition = common.disposition.as_ref().map(|value| value.ty.as_ref());
         let explicit_attachment = disposition
             .is_some_and(|value| value.eq_ignore_ascii_case("attachment"))
@@ -279,7 +280,7 @@ pub fn plan_bodystructure(bs: &async_imap::imap_proto::BodyStructure<'_>) -> Mim
                 section: section.clone(),
                 kind,
                 mime_type: mime_type.clone(),
-                charset: param(&common.ty.params, "charset"),
+                charset: param(&common.ty.params, "charset").map(str::to_owned),
                 transfer_encoding: encoding(&other.transfer_encoding),
                 size: other.octets,
             });
