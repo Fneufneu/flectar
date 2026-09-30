@@ -1123,9 +1123,26 @@ pub fn sanitize_html(html: &str) -> String {
         .map(|section| sanitize_container_attributes(section.attributes))
         .unwrap_or_default();
 
-    format!(
-        "<html{html_attributes}><head>{head}</head><body{body_attributes}>{body_content}</body></html>"
-    )
+    let capacity = "<html><head></head><body></body></html>".len()
+        + html_attributes.len()
+        + head.len()
+        + body_attributes.len()
+        + body_content.len();
+    let mut sanitized = String::with_capacity(capacity);
+    for part in [
+        "<html",
+        &html_attributes,
+        "><head>",
+        &head,
+        "</head><body",
+        &body_attributes,
+        ">",
+        &body_content,
+        "</body></html>",
+    ] {
+        sanitized.push_str(part);
+    }
+    sanitized
 }
 
 #[derive(Clone, Copy)]
