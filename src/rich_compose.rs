@@ -1272,36 +1272,48 @@ fn inline_html(line: &RichLine, skip: usize) -> String {
         for &character in &line.chars[start..end] {
             append_html_char(&mut escaped, character);
         }
-        result.push_str(&html_run(&escaped, style));
+        append_html_run(&mut result, &escaped, style);
         start = end;
     }
     result
 }
 
-fn html_run(escaped: &str, style: &CharacterStyle) -> String {
+fn append_html_run(output: &mut String, escaped: &str, style: &CharacterStyle) {
     if escaped.is_empty() {
-        return String::new();
-    }
-    let mut value = escaped.to_owned();
-    if style.marks & CODE != 0 {
-        value = format!("<code>{value}</code>");
-    }
-    if style.marks & UNDERLINE != 0 {
-        value = format!("<u>{value}</u>");
-    }
-    if style.marks & STRIKE != 0 {
-        value = format!("<s>{value}</s>");
-    }
-    if style.marks & ITALIC != 0 {
-        value = format!("<em>{value}</em>");
-    }
-    if style.marks & BOLD != 0 {
-        value = format!("<strong>{value}</strong>");
+        return;
     }
     if let Some(url) = style.link.as_deref() {
-        value = format!("<a href=\"{}\">{value}</a>", escape_html_attribute(url));
+        output.push_str("<a href=\"");
+        for character in url.chars() {
+            append_html_char(output, character);
+        }
+        output.push_str("\">");
     }
-    value
+    let tags = [
+        (BOLD, "strong"),
+        (ITALIC, "em"),
+        (STRIKE, "s"),
+        (UNDERLINE, "u"),
+        (CODE, "code"),
+    ];
+    for (mark, tag) in tags {
+        if style.marks & mark != 0 {
+            output.push('<');
+            output.push_str(tag);
+            output.push('>');
+        }
+    }
+    output.push_str(escaped);
+    for (mark, tag) in tags.into_iter().rev() {
+        if style.marks & mark != 0 {
+            output.push_str("</");
+            output.push_str(tag);
+            output.push('>');
+        }
+    }
+    if style.link.is_some() {
+        output.push_str("</a>");
+    }
 }
 
 fn append_html_char(output: &mut String, character: char) {
@@ -1313,14 +1325,6 @@ fn append_html_char(output: &mut String, character: char) {
         '\'' => output.push_str("&#39;"),
         _ => output.push(character),
     }
-}
-
-fn escape_html_attribute(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    for character in value.chars() {
-        append_html_char(&mut output, character);
-    }
-    output
 }
 
 fn ordered(a: usize, b: usize) -> (usize, usize) {
