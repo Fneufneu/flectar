@@ -30,11 +30,24 @@ fn unescape(value: &str) -> String {
 }
 
 fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace(';', "\\;")
-        .replace(',', "\\,")
+    let capacity = value
+        .chars()
+        .map(|ch| match ch {
+            '\\' | '\n' | ';' | ',' => 2,
+            _ => ch.len_utf8(),
+        })
+        .sum();
+    let mut escaped = String::with_capacity(capacity);
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            ';' => escaped.push_str("\\;"),
+            ',' => escaped.push_str("\\,"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn split_escaped(value: &str, delimiter: char) -> Vec<String> {
