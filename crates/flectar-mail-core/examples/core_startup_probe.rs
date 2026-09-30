@@ -50,6 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let empty_profile = source == "--empty";
     let release_after_start = std::env::args().nth(2).as_deref() == Some("--release-after-start");
     let release_before_settle = std::env::args().any(|arg| arg == "--release-before-settle");
+    let compare_reader_reopen = std::env::args().any(|arg| arg == "--compare-reader-reopen");
+    if compare_reader_reopen && !release_before_settle {
+        return Err("--compare-reader-reopen requires --release-before-settle".into());
+    }
     let open_calendar_before_settle =
         std::env::args().any(|arg| arg == "--open-calendar-before-settle");
     let settle_seconds = std::env::args()
@@ -259,6 +263,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if open_calendar_before_settle {
         core.calendar_db.read(|_| Ok(())).await?;
     }
+    let warm_reopen_control = if compare_reader_reopen {
+        let started = Instant::now();
+        let warm_page = core
+            .list_threads(View::Inbox, None, None, None, None, (None, 25))
+            .await?;
+        let list_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        let warm_badges = core.mailbox_badge_counts().await?;
+        let badges_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            warm_page
+                .threads
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            page.threads.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        assert_eq!(warm_badges, badges);
+        Some(json!({"list_ms": list_ms, "badges_ms": badges_ms}))
+    } else {
+        None
+    };
     let before_settle = if release_before_settle {
         core.db.release_idle_connections().await?;
         Some(sample(&core).await?)
@@ -267,6 +293,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tokio::time::sleep(std::time::Duration::from_secs(settle_seconds)).await;
     let after_settle = sample(&core).await?;
+    let reader_reopen = if compare_reader_reopen {
+        let started = Instant::now();
+        let reopened_page = core
+            .list_threads(View::Inbox, None, None, None, None, (None, 25))
+            .await?;
+        let first_list_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        let reopened_badges = core.mailbox_badge_counts().await?;
+        let first_badges_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            reopened_page
+                .threads
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            page.threads.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        assert_eq!(reopened_badges, badges);
+        let after_reopen = sample(&core).await?;
+
+        let started = Instant::now();
+        let repeated_page = core
+            .list_threads(View::Inbox, None, None, None, None, (None, 25))
+            .await?;
+        let repeat_list_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        let repeated_badges = core.mailbox_badge_counts().await?;
+        let repeat_badges_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            repeated_page
+                .threads
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            page.threads.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        assert_eq!(repeated_badges, badges);
+
+        core.db.release_idle_connections().await?;
+        let after_second_release = sample(&core).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(settle_seconds)).await;
+        let after_second_settle = sample(&core).await?;
+        Some(json!({
+            "first_list_ms": first_list_ms,
+            "first_badges_ms": first_badges_ms,
+            "repeat_list_ms": repeat_list_ms,
+            "repeat_badges_ms": repeat_badges_ms,
+            "after_reopen": after_reopen,
+            "after_second_release": after_second_release,
+            "after_second_settle": after_second_settle,
+        }))
+    } else {
+        None
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -288,6 +368,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "release_after_start": release_after_start,
             "empty_profile": empty_profile,
             "release_before_settle": release_before_settle,
+            "compare_reader_reopen": compare_reader_reopen,
             "open_calendar_before_settle": open_calendar_before_settle,
             "settle_seconds": settle_seconds,
             "after_start": after_start,
@@ -300,6 +381,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "after_search": after_search,
             "before_settle": before_settle,
             "after_settle": after_settle,
+            "warm_reopen_control": warm_reopen_control,
+            "reader_reopen": reader_reopen,
         }))?
     );
     Ok(())
