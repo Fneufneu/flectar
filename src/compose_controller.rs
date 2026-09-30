@@ -52,18 +52,44 @@ pub(super) fn prepare_message_compose(
         .unwrap_or_else(|| "an earlier time".to_owned());
 
     if action == "forward" {
+        let original_body = original_body.trim_end();
+        let recipient_capacity = source
+            .to
+            .iter()
+            .map(|address| {
+                address.email.len() + address.name.as_deref().map_or(0, |name| name.len() + 3) + 2
+            })
+            .sum::<usize>();
+        let mut body = String::with_capacity(
+            "\n\n---------- Forwarded message ----------\nFrom: \nDate: \nSubject: \nTo: \n\n"
+                .len()
+                + sender.len()
+                + sent_at.len()
+                + source.subject.len()
+                + recipient_capacity
+                + original_body.len(),
+        );
+        for part in [
+            "\n\n---------- Forwarded message ----------\nFrom: ",
+            &sender,
+            "\nDate: ",
+            &sent_at,
+            "\nSubject: ",
+            &source.subject,
+            "\nTo: ",
+        ] {
+            body.push_str(part);
+        }
+        append_addresses(&mut body, &source.to);
+        body.push_str("\n\n");
+        body.push_str(original_body);
         return Ok(PreparedMessageCompose {
             account_id: source.account_id,
             sender_email: source.default_sender_email.clone(),
             to: String::new(),
             cc: String::new(),
             subject: prefixed_subject(&source.subject, "Fwd"),
-            body: format!(
-                "\n\n---------- Forwarded message ----------\nFrom: {sender}\nDate: {sent_at}\nSubject: {}\nTo: {}\n\n{}",
-                source.subject,
-                join_addresses(&source.to),
-                original_body.trim_end(),
-            ),
+            body,
             intent: ComposeIntent {
                 mode: "forward".to_owned(),
                 in_reply_to_message_id: None,
