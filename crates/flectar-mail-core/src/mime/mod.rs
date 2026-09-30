@@ -2034,16 +2034,14 @@ fn extract_data_uri_images(html: &str) -> (std::borrow::Cow<'_, str>, Vec<Inline
     if !html.contains(MARKER) {
         return (std::borrow::Cow::Borrowed(html), Vec::new());
     }
-    let mut out = String::new();
+    let mut out: Option<String> = None;
     let mut images = Vec::new();
     let mut rest = html;
+    let mut copied = 0;
     while let Some(pos) = rest.find(MARKER) {
-        out.push_str(&rest[..pos]);
+        let source_start = html.len() - rest.len() + pos;
         let after = &rest[pos + 5..]; // past `src="`, starts at `data:image/`
         let Some(endq) = after.find('"') else {
-            // unterminated attribute: keep the tail untouched
-            out.push_str(&rest[pos..]);
-            rest = "";
             break;
         };
         let uri = &after[..endq];
@@ -2054,27 +2052,30 @@ fn extract_data_uri_images(html: &str) -> (std::borrow::Cow<'_, str>, Vec<Inline
                 base64::engine::general_purpose::STANDARD
                     .decode(b64.trim())
                     .ok()
-                    .map(|bytes| (mime.to_string(), bytes))
+                    .map(|bytes| (mime.to_owned(), bytes))
             });
-        match decoded {
-            Some((mime_type, bytes)) => {
-                let cid = format!("img{}.{}", images.len() + 1, rand_token());
-                out.push_str(&format!("src=\"cid:{cid}\""));
-                images.push(InlineImage {
-                    mime_type,
-                    cid,
-                    bytes,
-                });
-            }
-            None => out.push_str(&rest[pos..pos + 5 + endq + 1]),
+        if let Some((mime_type, bytes)) = decoded {
+            let cid = format!("img{}.{}", images.len() + 1, rand_token());
+            let output = out.get_or_insert_with(String::new);
+            output.push_str(&html[copied..source_start]);
+            output.push_str("src=\"cid:");
+            output.push_str(&cid);
+            output.push('"');
+            copied = source_start + 5 + endq + 1;
+            images.push(InlineImage {
+                mime_type,
+                cid,
+                bytes,
+            });
         }
         rest = &after[endq + 1..];
     }
-    out.push_str(rest);
-    if images.is_empty() {
-        (std::borrow::Cow::Borrowed(html), images)
-    } else {
-        (std::borrow::Cow::Owned(out), images)
+    match out {
+        Some(mut output) => {
+            output.push_str(&html[copied..]);
+            (std::borrow::Cow::Owned(output), images)
+        }
+        None => (std::borrow::Cow::Borrowed(html), images),
     }
 }
 
@@ -2289,6 +2290,27 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_extraction_preserves_invalid_neighbors_and_unterminated_tail() {
+        let invalid = "<img src=\"data:image/png;base64,%%%\">";
+        assert!(matches!(
+            extract_data_uri_images(invalid).0,
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let tail = "<img src=\"data:image/png;base64,unterminated";
+        let html = format!("é{invalid}<img src=\"data:image/png;base64,AAE=\">{invalid}{tail}");
+        let (rewritten, images) = extract_data_uri_images(&html);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].bytes, [0, 1]);
+        assert_eq!(
+            rewritten,
+            format!(
+                "é{invalid}<img src=\"cid:{}\">{invalid}{tail}",
+                images[0].cid
+            )
+        );
+    }
 
     #[test]
     fn borrowed_attachment_keeps_source_and_round_trips_large_bytes() {
