@@ -603,13 +603,22 @@ fn calendar_shell(method: &str, body: impl FnOnce(&mut String)) -> String {
 /// Encode a parameter value per RFC 5545 §3.2: quote when it contains
 /// characters that would break the property line (quotes themselves are
 /// disallowed in param values, so they are dropped).
-fn param_value(v: &str) -> String {
-    let clean: String = v.chars().filter(|c| *c != '"').collect();
-    if clean.contains([',', ';', ':']) {
-        format!("\"{clean}\"")
-    } else {
-        clean
+fn param_value(v: &str) -> Cow<'_, str> {
+    let quote = v.contains([',', ';', ':']);
+    if !quote && !v.contains('"') {
+        return Cow::Borrowed(v);
     }
+    let capacity =
+        v.len() - v.bytes().filter(|&byte| byte == b'"').count() + if quote { 2 } else { 0 };
+    let mut clean = String::with_capacity(capacity);
+    if quote {
+        clean.push('"');
+    }
+    clean.extend(v.chars().filter(|&character| character != '"'));
+    if quote {
+        clean.push('"');
+    }
+    Cow::Owned(clean)
 }
 
 fn organizer_prop(out: &mut String, addr: &Address) {
