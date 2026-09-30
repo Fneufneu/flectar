@@ -2010,6 +2010,18 @@ fn build_message_with_attachments(
     out: &OutgoingMessage<'_>,
     attachments: impl IntoIterator<Item = OutgoingAttachment>,
 ) -> Result<(String, Vec<u8>)> {
+    // A large binary part expands predictably under MIME base64. Reserve near
+    // the final size so Vec growth does not leave substantial unused capacity
+    // in the complete message held through protection and provider upload.
+    const MIN_PREALLOCATED_BINARY_BYTES: usize = 1024 * 1024;
+    const MAX_PREALLOCATED_MIME_BYTES: usize = 64 * 1024 * 1024;
+    fn encoded_binary_len(bytes: usize) -> usize {
+        let encoded = bytes.div_ceil(3).saturating_mul(4);
+        encoded.saturating_add(encoded.div_ceil(76).saturating_mul(2))
+    }
+    let mut binary_output_bytes = 0usize;
+    let mut other_source_bytes = out.body_text.len();
+    let mut part_count = 0usize;
     let stable_id = out
         .message_id
         .map(str::trim)
@@ -2055,8 +2067,12 @@ fn build_message_with_attachments(
         && !html.trim().is_empty()
     {
         let (html, inline_images) = extract_data_uri_images(html);
+        other_source_bytes = other_source_bytes.saturating_add(html.len());
         builder = builder.html_body(html);
         for img in inline_images {
+            binary_output_bytes =
+                binary_output_bytes.saturating_add(encoded_binary_len(img.bytes.len()));
+            part_count += 1;
             builder = builder.inline(img.mime_type, img.cid, img.bytes);
         }
     }
@@ -2071,6 +2087,17 @@ fn build_message_with_attachments(
         builder = builder.bcc(bcc_mb);
     }
     for att in attachments {
+        if att
+            .mime_type
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("text/"))
+        {
+            other_source_bytes = other_source_bytes.saturating_add(att.bytes.len());
+        } else {
+            binary_output_bytes =
+                binary_output_bytes.saturating_add(encoded_binary_len(att.bytes.len()));
+        }
+        part_count += 1;
         builder = builder.attachment(att.mime_type, att.filename, att.bytes);
     }
     if let Some(irt) = out.in_reply_to {
@@ -2085,9 +2112,25 @@ fn build_message_with_attachments(
         builder = builder.references(refs);
     }
 
-    let raw = builder
-        .write_to_vec()
-        .map_err(|e| CoreError::Mime(e.to_string()))?;
+    // Quoted-printable and UTF-8 text may expand during serialization.
+    let reserve = binary_output_bytes
+        .saturating_add(other_source_bytes.saturating_mul(4))
+        .saturating_add(64 * 1024)
+        .saturating_add(part_count.saturating_mul(1024));
+    let raw = if binary_output_bytes >= MIN_PREALLOCATED_BINARY_BYTES
+        && other_source_bytes <= binary_output_bytes / 64
+        && reserve <= MAX_PREALLOCATED_MIME_BYTES
+    {
+        let mut raw = Vec::with_capacity(reserve);
+        builder
+            .write_to(&mut raw)
+            .map_err(|e| CoreError::Mime(e.to_string()))?;
+        raw
+    } else {
+        builder
+            .write_to_vec()
+            .map_err(|e| CoreError::Mime(e.to_string()))?
+    };
     Ok((msg_id, raw))
 }
 
@@ -2452,6 +2495,24 @@ mod tests {
             assert_eq!(parts[0].attachment_name(), Some("binary.bin"));
             assert_eq!(parts[0].contents(), &[0, 1, 2, 127, 128, 255]);
         }
+    }
+
+    #[test]
+    fn large_owned_attachment_round_trips_without_truncation() {
+        let mut message = outgoing("body", None);
+        message.message_id = Some("stable.large@example.com");
+        let payload = vec![0x5a; 1024 * 1024];
+        message.attachments.push(OutgoingAttachment {
+            filename: "large.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            bytes: payload.clone(),
+        });
+        let (message_id, raw) = build_message_owned(message).unwrap();
+        assert_eq!(message_id, "<stable.large@example.com>");
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        let part = parsed.attachments().next().unwrap();
+        assert_eq!(part.attachment_name(), Some("large.bin"));
+        assert_eq!(part.contents(), payload);
     }
 
     #[test]
