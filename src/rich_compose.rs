@@ -119,12 +119,6 @@ enum BlockKind {
     Quote,
 }
 
-#[derive(Clone, Debug, Default)]
-struct RichLine {
-    chars: Vec<char>,
-    styles: Vec<CharacterStyle>,
-}
-
 impl RichComposeDocument {
     pub fn reset(&mut self) {
         let revision = self.revision.wrapping_add(1);
@@ -559,63 +553,81 @@ impl RichComposeDocument {
         start_byte: usize,
         end_byte: usize,
     ) -> ComposeSelection {
-        let chars = self.text.chars().collect::<Vec<_>>();
-        let start_char = byte_to_char(&self.text, start_byte);
-        let end_char = byte_to_char(&self.text, end_byte);
-        let start_line = chars[..start_char].iter().filter(|&&c| c == '\n').count();
-        let end_probe = if end_char > start_char {
-            end_char.saturating_sub(1)
-        } else {
-            end_char
-        };
-        let end_line = chars[..end_probe.min(chars.len())]
+        let start_line = self.text.as_bytes()[..start_byte]
             .iter()
-            .filter(|&&c| c == '\n')
+            .filter(|&&byte| byte == b'\n')
             .count();
-
-        let mut lines = self.lines();
-        if lines.is_empty() || start_line >= lines.len() {
-            return ComposeSelection {
-                start: to_i32(start_byte),
-                end: to_i32(end_byte),
-            };
-        }
-        let end_line = end_line.min(lines.len() - 1);
+        let end_probe = if end_byte > start_byte {
+            end_byte - 1
+        } else {
+            end_byte
+        };
+        let end_line = self.text.as_bytes()[..end_probe]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count();
+        let all_target = self
+            .text
+            .split('\n')
+            .skip(start_line)
+            .take(end_line - start_line + 1)
+            .all(|line| block_prefix_text(line).is_some_and(|(current, _)| current == kind));
         let before = self.take_snapshot();
         self.typing_override = None;
-
-        let all_target = lines[start_line..=end_line]
-            .iter()
-            .all(|line| block_prefix(&line.chars).is_some_and(|(current, _)| current == kind));
-
-        for (offset, line) in lines[start_line..=end_line].iter_mut().enumerate() {
-            if let Some((_, prefix_len)) = block_prefix(&line.chars) {
-                line.chars.drain(..prefix_len);
-                line.styles.drain(..prefix_len);
+        let mut text = String::with_capacity(before.text.len());
+        let mut styles = Vec::with_capacity(before.styles.len());
+        let mut source_start = 0;
+        let mut start = 0;
+        let mut end = 0;
+        for (index, line) in before.text.split('\n').enumerate() {
+            if index > 0 {
+                let byte = text.len();
+                text.push('\n');
+                push_style_run(&mut styles, byte..text.len(), CharacterStyle::default());
             }
-            if all_target {
-                continue;
+            if index == start_line {
+                start = text.len();
             }
-            let prefix = match kind {
-                BlockKind::Bullet => "• ".to_owned(),
-                BlockKind::Number => format!("{}. ", offset + 1),
-                BlockKind::Quote => "│ ".to_owned(),
+            let selected = (start_line..=end_line).contains(&index);
+            let skip = if selected {
+                block_prefix_text(line).map_or(0, |(_, bytes)| bytes)
+            } else {
+                0
             };
-            let prefix_chars = prefix.chars().collect::<Vec<_>>();
-            line.styles.splice(
-                0..0,
-                std::iter::repeat_n(CharacterStyle::default(), prefix_chars.len()),
-            );
-            line.chars.splice(0..0, prefix_chars);
+            if selected && !all_target {
+                let prefix = match kind {
+                    BlockKind::Bullet => Cow::Borrowed("• "),
+                    BlockKind::Quote => Cow::Borrowed("│ "),
+                    BlockKind::Number => Cow::Owned(format!("{}. ", index - start_line + 1)),
+                };
+                let byte = text.len();
+                text.push_str(&prefix);
+                push_style_run(&mut styles, byte..text.len(), CharacterStyle::default());
+            }
+            let content_start = source_start + skip;
+            let content_end = source_start + line.len();
+            let destination_start = text.len();
+            text.push_str(&before.text[content_start..content_end]);
+            let first = before
+                .styles
+                .partition_point(|run| run.range.end <= content_start);
+            for run in before.styles[first..]
+                .iter()
+                .take_while(|run| run.range.start < content_end)
+            {
+                let first_byte =
+                    run.range.start.max(content_start) - content_start + destination_start;
+                let last_byte = run.range.end.min(content_end) - content_start + destination_start;
+                push_style_run(&mut styles, first_byte..last_byte, run.style.clone());
+            }
+            if index == end_line {
+                end = text.len();
+            }
+            source_start += line.len() + 1;
         }
-
-        self.rebuild_lines(lines);
+        self.text = text;
+        self.styles = styles;
         self.bump_revision();
-        let rebuilt_chars = self.text.chars().collect::<Vec<_>>();
-        let selection_start_char = line_start_char(&rebuilt_chars, start_line);
-        let selection_end_char = line_end_char(&rebuilt_chars, end_line);
-        let start = char_to_byte(&self.text, selection_start_char);
-        let end = char_to_byte(&self.text, selection_end_char);
         self.selection = (to_i32(start), to_i32(end));
         self.commit_edit(before);
         ComposeSelection {
@@ -671,39 +683,6 @@ impl RichComposeDocument {
                 }
             });
         }
-    }
-
-    fn lines(&self) -> Vec<RichLine> {
-        let mut lines = vec![RichLine::default()];
-        for (byte, character) in self.text.char_indices() {
-            if character == '\n' {
-                lines.push(RichLine::default());
-            } else if let Some(line) = lines.last_mut() {
-                line.chars.push(character);
-                line.styles
-                    .push(self.style_at(byte).cloned().unwrap_or_default());
-            }
-        }
-        lines
-    }
-
-    fn rebuild_lines(&mut self, lines: Vec<RichLine>) {
-        let mut text = String::new();
-        let mut styles = Vec::new();
-        for (index, line) in lines.into_iter().enumerate() {
-            if index > 0 {
-                let start = text.len();
-                text.push('\n');
-                push_style_run(&mut styles, start..text.len(), CharacterStyle::default());
-            }
-            for (character, style) in line.chars.into_iter().zip(line.styles) {
-                let start = text.len();
-                text.push(character);
-                push_style_run(&mut styles, start..text.len(), style);
-            }
-        }
-        self.text = text;
-        self.styles = styles;
     }
 
     fn style_at(&self, byte: usize) -> Option<&CharacterStyle> {
@@ -1356,36 +1335,6 @@ fn valid_offset(text: &str, offset: i32) -> usize {
     offset
 }
 
-fn byte_to_char(text: &str, byte: usize) -> usize {
-    text[..byte.min(text.len())].chars().count()
-}
-
-fn char_to_byte(text: &str, character: usize) -> usize {
-    text.char_indices()
-        .nth(character)
-        .map_or(text.len(), |(byte, _)| byte)
-}
-
-fn line_start_char(chars: &[char], target: usize) -> usize {
-    if target == 0 {
-        return 0;
-    }
-    chars
-        .iter()
-        .enumerate()
-        .filter(|(_, character)| **character == '\n')
-        .nth(target - 1)
-        .map_or(chars.len(), |(index, _)| index + 1)
-}
-
-fn line_end_char(chars: &[char], target: usize) -> usize {
-    let start = line_start_char(chars, target);
-    chars[start..]
-        .iter()
-        .position(|&character| character == '\n')
-        .map_or(chars.len(), |relative| start + relative)
-}
-
 fn to_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -1497,6 +1446,32 @@ mod tests {
             document.body_html().as_deref(),
             Some("<div>Hello <strong>W</strong></div>")
         );
+    }
+
+    #[test]
+    fn long_unicode_block_edits_keep_compact_styles_and_undo() {
+        let text = format!("{}\nsecond é👩‍🚀\n", "界".repeat(350_000));
+        let start = text.find("second").unwrap() as i32;
+        let end = (text.len() - 1) as i32;
+        let mut document = RichComposeDocument::default();
+        document.synchronize(&text, start, end);
+        document.format("bold", &text, start, end);
+        let html_before = document.body_html();
+        document.format("bullet", &text, start, end);
+        assert!(document.text().contains("\n• second é👩‍🚀\n"));
+        assert!(document.style_runs().len() <= 5);
+        assert!(
+            document
+                .body_html()
+                .unwrap()
+                .contains("<li><strong>second é👩‍🚀</strong></li>")
+        );
+        document.history("undo").unwrap();
+        assert_eq!(document.text(), text);
+        assert_eq!(document.body_html(), html_before);
+        document.history("redo").unwrap();
+        assert!(document.text().contains("\n• second é👩‍🚀\n"));
+        assert_style_coverage(&document);
     }
 
     #[test]
