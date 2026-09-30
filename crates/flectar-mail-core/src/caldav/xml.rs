@@ -315,11 +315,34 @@ pub fn report_multiget(hrefs: &[String]) -> String {
     )
 }
 
-pub fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+fn escaped_len(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| match character {
+            '&' => 5,
+            '<' | '>' => 4,
+            '"' => 6,
+            _ => character.len_utf8(),
+        })
+        .sum()
+}
+
+fn append_escaped(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+pub fn xml_escape(value: &str) -> String {
+    let mut output = String::with_capacity(escaped_len(value));
+    append_escaped(&mut output, value);
+    output
 }
 
 #[cfg(test)]
