@@ -1413,18 +1413,15 @@ fn domains_aligned(a: &str, b: &str) -> bool {
 /// Order: Sender: (self-declared), Return-Path (envelope sender, stamped by
 /// the receiving server - a forged From: can't easily hide it), DKIM d=.
 fn resolve_via(msg: &mail_parser::Message, from: Option<&Address>) -> Option<String> {
-    let from_domain = from.map(|a| domain_of(&a.email).to_string());
+    let from_domain = from.map(|a| domain_of(&a.email));
 
     let sender_email = msg
         .sender()
         .and_then(|s| s.first())
-        .and_then(addr_from)
-        .map(|a| a.email);
+        .and_then(|address| address.address());
     let return_path = match msg.return_path() {
-        mail_parser::HeaderValue::Text(t) => Some(t.trim_matches(['<', '>', ' ']).to_string()),
-        mail_parser::HeaderValue::TextList(l) => l
-            .last()
-            .map(|t| t.trim_matches(['<', '>', ' ']).to_string()),
+        mail_parser::HeaderValue::Text(t) => Some(t.trim_matches(['<', '>', ' '])),
+        mail_parser::HeaderValue::TextList(l) => l.last().map(|t| t.trim_matches(['<', '>', ' '])),
         _ => None,
     }
     .filter(|s| !s.is_empty());
@@ -1432,15 +1429,16 @@ fn resolve_via(msg: &mail_parser::Message, from: Option<&Address>) -> Option<Str
         .header("DKIM-Signature")
         .and_then(|h| h.as_text())
         .and_then(|s| DKIM_DOMAIN.captures(s))
-        .map(|c| c[1].to_string());
+        .and_then(|captures| captures.get(1).map(|domain| domain.as_str()));
 
     [sender_email, return_path, dkim_domain]
         .into_iter()
         .flatten()
-        .find(|cand| match &from_domain {
+        .find(|cand| match from_domain {
             Some(fd) => !domains_aligned(domain_of(cand), fd),
             None => true,
         })
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -2206,6 +2204,20 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aligned_sender_falls_through_to_misaligned_transmitter() {
+        let raw = b"From: Alice <alice@corp.com>\r\nSender: Delegate <sender@MAIL.corp.COM>\r\nReturn-Path: <bounce@esp.example>\r\nDKIM-Signature: v=1; d=dkim.example;\r\n\r\nbody";
+        assert_eq!(
+            parse_message(raw).unwrap().headers.via.as_deref(),
+            Some("bounce@esp.example")
+        );
+        let raw = b"From: alice@corp.com\r\nSender: sender@mail.corp.com\r\nReturn-Path: <bounce@corp.com>\r\nDKIM-Signature: v=1; d=dkim.example;\r\n\r\nbody";
+        assert_eq!(
+            parse_message(raw).unwrap().headers.via.as_deref(),
+            Some("dkim.example")
+        );
+    }
 
     #[test]
     fn normalizes_subjects() {
