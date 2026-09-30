@@ -72,19 +72,30 @@ fn split_escaped(value: &str, delimiter: char) -> Vec<String> {
     parts
 }
 
-fn fold_line(line: String) -> Vec<String> {
-    const LIMIT: usize = 75;
-    let mut lines = Vec::new();
-    let mut current = String::new();
+fn folded_len(line: &str) -> usize {
+    let mut size = line.len() + 2;
+    let mut column = 0;
     for ch in line.chars() {
-        if current.len() + ch.len_utf8() > LIMIT {
-            lines.push(current);
-            current = String::from(" ");
+        if column + ch.len_utf8() > 75 {
+            size += 3; // CRLF and continuation space
+            column = 1;
         }
-        current.push(ch);
+        column += ch.len_utf8();
     }
-    lines.push(current);
-    lines
+    size
+}
+
+fn append_folded_line(output: &mut String, line: &str) {
+    let mut column = 0;
+    for ch in line.chars() {
+        if column + ch.len_utf8() > 75 {
+            output.push_str("\r\n ");
+            column = 1;
+        }
+        output.push(ch);
+        column += ch.len_utf8();
+    }
+    output.push_str("\r\n");
 }
 
 fn unfold(input: &str) -> Vec<String> {
@@ -161,12 +172,14 @@ fn property_name(line: &str) -> Option<&str> {
 }
 
 fn render(lines: Vec<String>) -> String {
-    lines
-        .into_iter()
-        .flat_map(fold_line)
-        .collect::<Vec<_>>()
-        .join("\r\n")
-        + "\r\n"
+    if lines.is_empty() {
+        return "\r\n".into();
+    }
+    let mut output = String::with_capacity(lines.iter().map(|line| folded_len(line)).sum());
+    for line in lines {
+        append_folded_line(&mut output, &line);
+    }
+    output
 }
 
 fn serialized_lines(record: &ContactRecord, uid: &str, version: &str) -> Vec<String> {
