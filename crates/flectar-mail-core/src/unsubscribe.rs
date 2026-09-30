@@ -40,20 +40,19 @@ pub fn plan(
     list_unsubscribe_post: Option<&str>,
 ) -> Option<UnsubscribePlan> {
     let mut uris = unsubscribe_uris(list_unsubscribe);
-    let web = uris.clone().find(|u| {
-        let l = u.to_ascii_lowercase();
-        l.starts_with("https://") || l.starts_with("http://")
-    });
+    let web = uris
+        .clone()
+        .find(|u| has_scheme_prefix(u, "https://") || has_scheme_prefix(u, "http://"));
     let one_click = list_unsubscribe_post.is_some_and(is_one_click_post);
 
     // RFC 8058 is https-only; a one-click marker on an http:// URI is ignored.
-    if one_click && let Some(url) = web.filter(|u| u.to_ascii_lowercase().starts_with("https://")) {
+    if one_click && let Some(url) = web.filter(|u| has_scheme_prefix(u, "https://")) {
         return Some(UnsubscribePlan::OneClick {
             url: url.to_string(),
         });
     }
 
-    if let Some(m) = uris.find(|u| u.to_ascii_lowercase().starts_with("mailto:"))
+    if let Some(m) = uris.find(|u| has_scheme_prefix(u, "mailto:"))
         && let Some(p) = parse_mailto(m)
     {
         return Some(p);
@@ -62,6 +61,12 @@ pub fn plan(
     web.map(|url| UnsubscribePlan::Browser {
         url: url.to_owned(),
     })
+}
+
+fn has_scheme_prefix(uri: &str, prefix: &str) -> bool {
+    uri.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 /// Parse `mailto:addr?subject=…&body=…` into a Mailto plan. Subject defaults
