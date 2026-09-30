@@ -369,16 +369,16 @@ fn same_occurrence(a: i64, b: i64) -> bool {
     (a - b).abs() < 60_000
 }
 
-fn unfolded_lines(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn unfolded_lines(text: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    let mut out: Vec<std::borrow::Cow<'_, str>> = Vec::new();
     for raw in text.lines() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         if (line.starts_with(' ') || line.starts_with('\t')) && !out.is_empty() {
             if let Some(previous) = out.last_mut() {
-                previous.push_str(&line[1..]);
+                previous.to_mut().push_str(&line[1..]);
             }
         } else {
-            out.push(line.to_string());
+            out.push(std::borrow::Cow::Borrowed(line));
         }
     }
     out
