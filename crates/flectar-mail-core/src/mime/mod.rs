@@ -1950,7 +1950,7 @@ fn extract_data_uri_images(html: &str) -> (std::borrow::Cow<'_, str>, Vec<Inline
     if !html.contains(MARKER) {
         return (std::borrow::Cow::Borrowed(html), Vec::new());
     }
-    let mut out = String::with_capacity(html.len());
+    let mut out = String::new();
     let mut images = Vec::new();
     let mut rest = html;
     while let Some(pos) = rest.find(MARKER) {
@@ -1987,7 +1987,11 @@ fn extract_data_uri_images(html: &str) -> (std::borrow::Cow<'_, str>, Vec<Inline
         rest = &after[endq + 1..];
     }
     out.push_str(rest);
-    (std::borrow::Cow::Owned(out), images)
+    if images.is_empty() {
+        (std::borrow::Cow::Borrowed(html), images)
+    } else {
+        (std::borrow::Cow::Owned(out), images)
+    }
 }
 
 /// Build a raw RFC 5322 message. Returns (message_id, raw_bytes).
@@ -2524,6 +2528,24 @@ mod tests {
         let (rewritten, images) = extract_data_uri_images(&html);
         assert!(matches!(rewritten, std::borrow::Cow::Borrowed(_)));
         assert_eq!(rewritten.as_ptr(), html.as_ptr());
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn embedded_image_rewrite_does_not_retain_base64_sized_capacity() {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(vec![7; 1024 * 1024]);
+        let html = format!("<img src=\"data:image/png;base64,{encoded}\">");
+        let (rewritten, images) = extract_data_uri_images(&html);
+        let std::borrow::Cow::Owned(rewritten) = rewritten else {
+            panic!("image must be rewritten")
+        };
+        assert_eq!(images[0].bytes.len(), 1024 * 1024);
+        assert!(rewritten.capacity() < 1024);
+        let invalid = "<img src=\"data:image/png;base64,invalid!\">";
+        let (unchanged, images) = extract_data_uri_images(invalid);
+        assert!(matches!(unchanged, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(unchanged.as_ptr(), invalid.as_ptr());
         assert!(images.is_empty());
     }
 
