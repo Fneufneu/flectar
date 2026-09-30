@@ -156,7 +156,7 @@ pub(crate) async fn read_headers(
     let mut file = tokio::fs::File::open(path.as_ref())
         .await
         .map_err(|error| CoreError::Other(format!("{context}: {error}")))?;
-    let mut bytes = Vec::with_capacity(16 * 1024.min(max_bytes));
+    let mut bytes = Vec::with_capacity((16 * 1024).min(max_bytes));
     let mut chunk = [0_u8; 16 * 1024];
     while bytes.len() < max_bytes {
         let remaining = max_bytes - bytes.len();
@@ -223,6 +223,18 @@ mod tests {
             4
         );
         assert_eq!(tokio::fs::read(destination).await.unwrap(), [1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn small_header_limits_also_bound_initial_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("message.eml");
+        tokio::fs::write(&path, b"X: a\n\nbody").await.unwrap();
+        for limit in [0, 1, 7, 1024, 16 * 1024] {
+            let bytes = read_headers(&path, limit, "small header").await.unwrap();
+            assert!(bytes.len() <= limit);
+            assert!(bytes.capacity() <= limit);
+        }
     }
 
     #[tokio::test]
