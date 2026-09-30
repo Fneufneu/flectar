@@ -1704,9 +1704,9 @@ fn without_comments(value: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(output)
 }
 
-/// Parse only the first (topmost) Authentication-Results field. Receiving
-/// MTAs prepend their result, while older fields below it may be supplied by
-/// an untrusted sender or an intermediate relay.
+/// Tokenize an unfolded Authentication-Results field after removing comments.
+/// The caller selects the topmost field and keeps its storage alive so these
+/// method/property slices can remain borrowed through classification.
 fn authentication_results(results: &str) -> Vec<AuthenticationResult<'_>> {
     results
         .split(';')
@@ -1718,8 +1718,19 @@ fn authentication_results(results: &str) -> Vec<AuthenticationResult<'_>> {
                 // begin a result clause.
                 return None;
             }
+            if !["bimi", "dmarc", "dkim", "compauth"]
+                .iter()
+                .any(|known| method.eq_ignore_ascii_case(known))
+            {
+                return None;
+            }
             let properties = tokens
                 .filter_map(|token| token.split_once('='))
+                .filter(|(name, _)| {
+                    ["policy.authority", "header.from", "header.d"]
+                        .iter()
+                        .any(|known| name.trim().eq_ignore_ascii_case(known))
+                })
                 .map(|(name, value)| {
                     (
                         name.trim(),
@@ -1842,6 +1853,9 @@ fn parse_headers(msg: &mail_parser::Message) -> ParsedHeaders {
 
     let from = msg.from().and_then(|f| f.first()).and_then(addr_from);
     let via = resolve_via(msg, from.as_ref());
+    // Receiving MTAs prepend their result; older fields may be untrusted.
+    // Remove comments before splitting clauses because they may contain
+    // semicolons and text resembling method=result authentication claims.
     let authentication_header = first_raw_header(msg, "Authentication-Results").unwrap_or_default();
     let authentication_header = without_comments(&authentication_header);
     let authentication_results = authentication_results(&authentication_header);
