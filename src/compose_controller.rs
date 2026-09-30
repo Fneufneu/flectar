@@ -162,14 +162,30 @@ fn deduplicated_addresses<'a>(
 fn join_addresses<'a>(
     addresses: impl IntoIterator<Item = &'a flectar_mail_core::models::Address>,
 ) -> String {
-    addresses
-        .into_iter()
-        .map(format_address)
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut output = String::new();
+    append_addresses(&mut output, addresses);
+    output
+}
+
+fn append_addresses<'a>(
+    output: &mut String,
+    addresses: impl IntoIterator<Item = &'a flectar_mail_core::models::Address>,
+) {
+    for (index, address) in addresses.into_iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        append_address(output, address);
+    }
 }
 
 fn format_address(address: &flectar_mail_core::models::Address) -> String {
+    let mut output = String::new();
+    append_address(&mut output, address);
+    output
+}
+
+fn append_address(output: &mut String, address: &flectar_mail_core::models::Address) {
     match address
         .name
         .as_deref()
@@ -181,9 +197,12 @@ fn format_address(address: &flectar_mail_core::models::Address) -> String {
                 .chars()
                 .filter(|character| !matches!(character, ',' | ';' | '<' | '>' | '\r' | '\n'))
                 .collect::<String>();
-            format!("{} <{}>", name.trim(), address.email)
+            output.push_str(name.trim());
+            output.push_str(" <");
+            output.push_str(&address.email);
+            output.push('>');
         }
-        None => address.email.clone(),
+        None => output.push_str(&address.email),
     }
 }
 
