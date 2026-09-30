@@ -705,10 +705,14 @@ impl RichComposeDocument {
     }
 
     fn merge_styles(&mut self) {
-        let old = std::mem::take(&mut self.styles);
-        for run in old {
-            push_style_run(&mut self.styles, run.range, run.style);
-        }
+        self.styles.dedup_by(|next, previous| {
+            if previous.range.end == next.range.start && previous.style == next.style {
+                previous.range.end = next.range.end;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     fn take_snapshot(&mut self) -> Snapshot {
@@ -1372,6 +1376,27 @@ mod tests {
             document.body_html().unwrap(),
             "<div><a href=\"https://example.org/?a=&quot;&amp;b=&#39;\"><strong><em><s><u><code>&lt;&amp;&quot;&#39;é👩‍🚀&gt;</code></u></s></em></strong></a></div>"
         );
+    }
+
+    #[test]
+    fn normalizing_styles_reuses_vector_storage() {
+        let mut document = RichComposeDocument::default();
+        document.text = "é界xy".into();
+        document.styles = Vec::with_capacity(20);
+        for range in [0..2, 2..5, 5..6, 6..7] {
+            document.styles.push(ComposeStyleRun {
+                range,
+                style: CharacterStyle::default(),
+            });
+        }
+        let pointer = document.styles.as_ptr();
+        let capacity = document.styles.capacity();
+        document.merge_styles();
+        assert_eq!(document.styles.as_ptr(), pointer);
+        assert_eq!(document.styles.capacity(), capacity);
+        assert_eq!(document.styles.len(), 1);
+        assert_eq!(document.styles[0].range, 0..7);
+        assert_style_coverage(&document);
     }
 
     #[test]
