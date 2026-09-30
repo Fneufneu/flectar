@@ -87,15 +87,17 @@ fn parse_mailto(uri: &str) -> Option<UnsubscribePlan> {
     for pair in query.unwrap_or("").split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         if k.eq_ignore_ascii_case("subject") {
-            subject = Some(percent_decode(v));
+            subject = Some(v);
         } else if k.eq_ignore_ascii_case("body") {
-            body = Some(percent_decode(v));
+            body = Some(v);
         }
     }
     let subject = subject
+        .map(percent_decode)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unsubscribe".into());
     let body = body
+        .map(percent_decode)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| subject.clone());
     Some(UnsubscribePlan::Mailto { to, subject, body })
