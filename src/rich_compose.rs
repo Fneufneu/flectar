@@ -656,42 +656,30 @@ impl RichComposeDocument {
         }
         self.merge_styles();
 
-        let mut urls = Vec::new();
-        let mut token_start = None;
-        for (byte, character) in self
-            .text
-            .char_indices()
-            .chain(std::iter::once((self.text.len(), ' ')))
-        {
-            if character.is_whitespace() {
-                if let Some(start) = token_start.take() {
-                    let mut end = byte;
-                    while end > start {
-                        let (relative, last) =
-                            self.text[start..end].char_indices().next_back().unwrap();
-                        if !matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
-                            break;
-                        }
-                        end = start + relative;
+        let mut next = 0;
+        while next < self.text.len() {
+            let Some(relative) =
+                self.text[next..].find(|character: char| !character.is_whitespace())
+            else {
+                break;
+            };
+            let start = next + relative;
+            let end = self.text[start..]
+                .find(char::is_whitespace)
+                .map_or(self.text.len(), |relative| start + relative);
+            next = end;
+            let token = self.text[start..end]
+                .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+            if token.starts_with("https://") || token.starts_with("http://") {
+                let end = start + token.len();
+                let link = Arc::<str>::from(token);
+                self.edit_styles(start, end, |style| {
+                    if style.link.is_none() || style.link_is_auto {
+                        style.link = Some(link.clone());
+                        style.link_is_auto = true;
                     }
-                    if self.text[start..end].starts_with("https://")
-                        || self.text[start..end].starts_with("http://")
-                    {
-                        urls.push((start, end));
-                    }
-                }
-            } else if token_start.is_none() {
-                token_start = Some(byte);
+                });
             }
-        }
-        for (start, end) in urls {
-            let link = Arc::<str>::from(&self.text[start..end]);
-            self.edit_styles(start, end, |style| {
-                if style.link.is_none() || style.link_is_auto {
-                    style.link = Some(link.clone());
-                    style.link_is_auto = true;
-                }
-            });
         }
     }
 
