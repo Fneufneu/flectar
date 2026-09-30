@@ -490,11 +490,17 @@ fn header_declares_base64(mime_header: &[u8]) -> bool {
 fn decode_base64_transfer(input: &[u8]) -> Option<Vec<u8>> {
     use base64::Engine;
 
-    let compact: Vec<u8> = input
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect();
+    let compact = if input.iter().any(u8::is_ascii_whitespace) {
+        std::borrow::Cow::Owned(
+            input
+                .iter()
+                .copied()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(input)
+    };
     if compact.is_empty() {
         return Some(Vec::new());
     }
@@ -2209,6 +2215,18 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_transfer_accepts_wrapping_and_missing_padding() {
+        for encoded in [b"aGVsbG8=".as_slice(), b"aGVsbG8", b"aG Vs\r\nbG8=\t"] {
+            assert_eq!(
+                decode_base64_transfer(encoded).as_deref(),
+                Some(b"hello".as_slice())
+            );
+        }
+        assert_eq!(decode_base64_transfer(b" \r\n\t"), Some(Vec::new()));
+        assert!(decode_base64_transfer(b"%%%invalid").is_none());
+    }
 
     #[test]
     fn automated_sender_prefixes_preserve_case_tags_and_utf8() {
