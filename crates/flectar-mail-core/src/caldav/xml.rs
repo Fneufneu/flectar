@@ -40,12 +40,13 @@ pub struct Multistatus {
     pub sync_token: Option<String>,
 }
 
-fn local_name(qname: &str) -> String {
-    qname
-        .rsplit(':')
-        .next()
-        .unwrap_or(qname)
-        .to_ascii_lowercase()
+fn local_name(value: &str) -> std::borrow::Cow<'_, str> {
+    let name = value.rsplit(':').next().unwrap_or(value);
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        std::borrow::Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
 }
 
 fn parse_status_line(s: &str) -> u16 {
@@ -87,8 +88,9 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
                         "XML nesting exceeds the {MAX_XML_DEPTH}-element safety limit"
                     )));
                 }
-                let name = local_name(e.name().as_ref());
-                match name.as_str() {
+                let qualified_name = e.name();
+                let name = local_name(qualified_name.as_ref());
+                match name.as_ref() {
                     "response" => {
                         cur = Some(DavItem::default());
                         propstat_status = 0;
@@ -103,12 +105,13 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
                     }
                     _ => {}
                 }
-                path.push(name);
+                path.push(name.into_owned());
                 text.clear();
             }
             Event::Empty(e) => {
-                let name = local_name(e.name().as_ref());
-                match name.as_str() {
+                let qualified_name = e.name();
+                let name = local_name(qualified_name.as_ref());
+                match name.as_ref() {
                     "calendar" if path.last().is_some_and(|p| p == "resourcetype") => {
                         if let Some(item) = cur.as_mut() {
                             item.is_calendar = true;
@@ -150,10 +153,11 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
                 text.push_str(&t.into_inner());
             }
             Event::End(e) => {
-                let name = local_name(e.name().as_ref());
+                let qualified_name = e.name();
+                let name = local_name(qualified_name.as_ref());
                 path.pop();
                 let value = text.trim();
-                match name.as_str() {
+                match name.as_ref() {
                     "response" => {
                         if let Some(mut item) = cur.take() {
                             if out.items.len() >= MAX_DAV_ITEMS {
