@@ -15,13 +15,27 @@ pub fn plain_text(signature: &Signature) -> String {
 }
 
 pub fn text_html(text: &str) -> String {
-    format!(
-        "<div>{}</div>",
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('\n', "<br>")
-    )
+    let extra: usize = text
+        .bytes()
+        .map(|byte| match byte {
+            b'&' => 4,
+            b'<' | b'>' | b'\n' => 3,
+            _ => 0,
+        })
+        .sum();
+    let mut html = String::with_capacity(text.len() + extra + 11);
+    html.push_str("<div>");
+    for ch in text.chars() {
+        match ch {
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            '\n' => html.push_str("<br>"),
+            _ => html.push(ch),
+        }
+    }
+    html.push_str("</div>");
+    html
 }
 
 /// Insert above the quotation, preserving the standard `-- ` delimiter.
