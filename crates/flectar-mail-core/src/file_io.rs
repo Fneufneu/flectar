@@ -31,10 +31,7 @@ pub(crate) async fn read(
         if read == 0 {
             return Ok(bytes);
         }
-        if read > max_bytes.saturating_sub(bytes.len()) {
-            return Err(too_large(context, max_bytes));
-        }
-        bytes.extend_from_slice(&chunk[..read]);
+        append_bounded(&mut bytes, &chunk[..read], max_bytes, context)?;
     }
 }
 
@@ -168,13 +165,35 @@ pub(crate) async fn read_headers(
         if read == 0 {
             break;
         }
-        bytes.extend_from_slice(&chunk[..read]);
+        append_bounded(&mut bytes, &chunk[..read], max_bytes, context)?;
         if let Some(end) = header_end(&bytes) {
             bytes.truncate(end);
             break;
         }
     }
     Ok(bytes)
+}
+
+// A file may grow after metadata is sampled. Keep buffer growth within the
+// caller's ceiling instead of Vec's implicit capacity doubling.
+fn append_bounded(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<()> {
+    if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+        return Err(too_large(context, max_bytes));
+    }
+    let required = bytes.len() + chunk.len();
+    if required > bytes.capacity() {
+        let target = required
+            .max(bytes.capacity().saturating_mul(2))
+            .min(max_bytes);
+        bytes.reserve_exact(target - bytes.len());
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn header_end(bytes: &[u8]) -> Option<usize> {
@@ -199,6 +218,18 @@ fn too_large(context: &'static str, max_bytes: usize) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growing_file_buffers_stay_within_the_ceiling() {
+        let mut bytes = Vec::with_capacity(12);
+        append_bounded(&mut bytes, &[1; 12], 20, "growing file").unwrap();
+        append_bounded(&mut bytes, &[2; 6], 20, "growing file").unwrap();
+        assert_eq!(bytes.len(), 18);
+        assert_eq!(bytes.capacity(), 20);
+        assert!(append_bounded(&mut bytes, &[3; 3], 20, "growing file").is_err());
+        assert_eq!(bytes.len(), 18);
+        assert!(bytes.capacity() <= 20);
+    }
 
     #[tokio::test]
     async fn file_read_stops_at_the_hard_limit() {
