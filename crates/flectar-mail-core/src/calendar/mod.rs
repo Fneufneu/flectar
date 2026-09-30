@@ -643,6 +643,23 @@ fn organizer_prop(out: &mut String, addr: &Address) {
     }
 }
 
+fn attendee_prop(out: &mut String, attendee: &Address, parameters: &[&str]) {
+    let name = attendee
+        .name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .map(param_value);
+    let prefix = if name.is_some() { "CN=" } else { "" };
+    let suffix = if name.is_some() { ";" } else { "" };
+    fold_parts(
+        ["ATTENDEE;", prefix, name.as_deref().unwrap_or(""), suffix]
+            .into_iter()
+            .chain(parameters.iter().copied())
+            .chain([":mailto:", attendee.email.as_str()]),
+        out,
+    );
+}
+
 /// Build a METHOD:REQUEST calendar for a new meeting invite.
 pub fn build_request_ics(spec: &InviteSpec) -> String {
     calendar_shell("REQUEST", |out| {
@@ -670,18 +687,10 @@ pub fn build_request_ics(spec: &InviteSpec) -> String {
         push_prop(out, "STATUS", "CONFIRMED");
         organizer_prop(out, spec.organizer);
         for a in spec.attendees {
-            let cn = a
-                .name
-                .as_deref()
-                .filter(|n| !n.is_empty())
-                .map(|n| format!("CN={};", param_value(n)))
-                .unwrap_or_default();
-            fold(
-                &format!(
-                    "ATTENDEE;{cn}ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{}",
-                    a.email
-                ),
+            attendee_prop(
                 out,
+                a,
+                &["ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE"],
             );
         }
     })
@@ -700,7 +709,7 @@ pub fn build_cancel_ics(spec: &InviteSpec) -> String {
         push_prop(out, "STATUS", "CANCELLED");
         organizer_prop(out, spec.organizer);
         for a in spec.attendees {
-            fold(&format!("ATTENDEE:mailto:{}", a.email), out);
+            fold_parts(["ATTENDEE:mailto:", a.email.as_str()], out);
         }
     })
 }
@@ -733,20 +742,7 @@ pub fn build_reply_ics(spec: &ReplySpec) -> String {
             push_prop(out, "SUMMARY", &escape(s));
         }
         fold_parts(["ORGANIZER:mailto:", spec.organizer_email], out);
-        let cn = spec
-            .attendee
-            .name
-            .as_deref()
-            .filter(|n| !n.is_empty())
-            .map(|n| format!("CN={};", param_value(n)))
-            .unwrap_or_default();
-        fold(
-            &format!(
-                "ATTENDEE;{cn}PARTSTAT={}:mailto:{}",
-                spec.partstat, spec.attendee.email
-            ),
-            out,
-        );
+        attendee_prop(out, spec.attendee, &["PARTSTAT=", spec.partstat]);
     })
 }
 
