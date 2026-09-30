@@ -1169,11 +1169,9 @@ fn continue_list_edit(old_text: &str, new_text: &str) -> Option<(String, i32)> {
     }
 
     let line_start = old_text[..insertion].rfind('\n').map_or(0, |byte| byte + 1);
-    let line = old_text[line_start..insertion].chars().collect::<Vec<_>>();
-    let (kind, prefix_len) = block_prefix(&line)?;
-    let content_is_empty = line[prefix_len..]
-        .iter()
-        .all(|character| character.is_whitespace());
+    let line = &old_text[line_start..insertion];
+    let (kind, prefix_len) = block_prefix_text(line)?;
+    let content_is_empty = line[prefix_len..].chars().all(char::is_whitespace);
     if content_is_empty {
         let mut text = String::with_capacity(new_text.len() - (insertion + 1 - line_start));
         text.push_str(&new_text[..line_start]);
@@ -1186,8 +1184,6 @@ fn continue_list_edit(old_text: &str, new_text: &str) -> Option<(String, i32)> {
         BlockKind::Quote => "│ ".to_owned(),
         BlockKind::Number => {
             let current = line[..prefix_len.saturating_sub(2)]
-                .iter()
-                .collect::<String>()
                 .parse::<usize>()
                 .unwrap_or(1);
             format!("{}. ", current.saturating_add(1))
@@ -1210,23 +1206,6 @@ fn block_prefix_text(text: &str) -> Option<(BlockKind, usize)> {
     }
     let digits = text.bytes().take_while(u8::is_ascii_digit).count();
     if digits > 0 && text.as_bytes().get(digits..digits + 2) == Some(b". ") {
-        return Some((BlockKind::Number, digits + 2));
-    }
-    None
-}
-
-fn block_prefix(chars: &[char]) -> Option<(BlockKind, usize)> {
-    if chars.starts_with(&['•', ' ']) {
-        return Some((BlockKind::Bullet, 2));
-    }
-    if chars.starts_with(&['│', ' ']) {
-        return Some((BlockKind::Quote, 2));
-    }
-    let digits = chars
-        .iter()
-        .take_while(|character| character.is_ascii_digit())
-        .count();
-    if digits > 0 && chars.get(digits) == Some(&'.') && chars.get(digits + 1) == Some(&' ') {
         return Some((BlockKind::Number, digits + 2));
     }
     None
@@ -1499,6 +1478,21 @@ mod tests {
         let numbered = document.synchronize("3. Third\n", 9, 9);
         assert_eq!(document.text(), "3. Third\n4. ");
         assert_eq!(numbered, ComposeSelection { start: 12, end: 12 });
+    }
+
+    #[test]
+    fn long_list_continuation_preserves_unicode_and_number_overflow() {
+        let old = format!("• {}", "界".repeat(350_000));
+        let entered = format!("{old}\n");
+        let (continued, cursor) = continue_list_edit(&old, &entered).unwrap();
+        assert_eq!(continued, format!("{old}\n• "));
+        assert_eq!(cursor as usize, continued.len());
+        let old = format!("{}. é👩‍🚀", usize::MAX);
+        let (continued, _) = continue_list_edit(&old, &format!("{old}\n")).unwrap();
+        assert_eq!(continued, format!("{old}\n{}. ", usize::MAX));
+        let (empty, cursor) = continue_list_edit("│ \u{2003}", "│ \u{2003}\n").unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(cursor, 0);
     }
 
     #[test]
