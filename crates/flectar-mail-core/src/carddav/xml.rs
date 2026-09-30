@@ -303,10 +303,13 @@ pub fn state() -> String {
     r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop><cs:getctag/><d:sync-token/></d:prop></d:propfind>"#.into()
 }
 pub fn sync_collection(token: &str) -> String {
-    format!(
-        r#"<?xml version="1.0"?><d:sync-collection xmlns:d="DAV:"><d:sync-token>{}</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>"#,
-        escape(token)
-    )
+    const PREFIX: &str = r#"<?xml version="1.0"?><d:sync-collection xmlns:d="DAV:"><d:sync-token>"#;
+    const SUFFIX: &str = r#"</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>"#;
+    let mut output = String::with_capacity(PREFIX.len() + escaped_len(token) + SUFFIX.len());
+    output.push_str(PREFIX);
+    append_escaped(&mut output, token);
+    output.push_str(SUFFIX);
+    output
 }
 pub fn addressbook_query() -> String {
     // FN is required by both vCard 3.0 and 4.0. Querying it lists every valid
