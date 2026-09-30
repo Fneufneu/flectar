@@ -6,7 +6,7 @@
 
 use crate::models::Address;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IcsAttendee {
@@ -43,17 +43,17 @@ pub struct IcsEvent {
 }
 
 /// Unfold RFC 5545 folded lines (continuations start with space or tab).
-fn unfold(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn unfold(text: &str) -> Vec<Cow<'_, str>> {
+    let mut out: Vec<Cow<'_, str>> = Vec::new();
     for raw in text.lines() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         if (line.starts_with(' ') || line.starts_with('\t')) && !out.is_empty() {
             let cont = &line[1..];
             if let Some(previous) = out.last_mut() {
-                previous.push_str(cont);
+                previous.to_mut().push_str(cont);
             }
         } else {
-            out.push(line.to_string());
+            out.push(Cow::Borrowed(line));
         }
     }
     out
@@ -210,7 +210,7 @@ fn nth_weekday(year: i32, month: u32, weekday: Weekday, nth: i32) -> Option<Naiv
 
 /// Collect VTIMEZONE definitions into TZID -> observances. Uses the offsets the
 /// invite carries in-band, so we never need a Windows/IANA zone-name table.
-fn parse_vtimezones(lines: &[String]) -> HashMap<String, Vec<TzObservance>> {
+fn parse_vtimezones(lines: &[Cow<'_, str>]) -> HashMap<String, Vec<TzObservance>> {
     let mut map: HashMap<String, Vec<TzObservance>> = HashMap::new();
     let mut tzid: Option<String> = None;
     let mut in_sub = false;
