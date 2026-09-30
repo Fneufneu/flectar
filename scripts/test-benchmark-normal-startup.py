@@ -74,7 +74,7 @@ time.sleep(10)
                 benchmark.load_artifact_manifest(path, 'a' * 64)
 
     def test_invalid_sample_intervals_fail_before_launch(self):
-        for value in ['0', '-1', 'nan', 'inf', '100']:
+        for value in ['0', '-1', 'nan', 'inf', '100', '0.000001']:
             result = subprocess.run(['python3', str(Path(benchmark.__file__)), '--binary', '/bin/true', '--output', '/dev/null', '--sample-interval', value], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('sample interval', result.stderr)

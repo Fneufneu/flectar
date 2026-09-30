@@ -277,8 +277,8 @@ def main() -> None:
         parser.error("this benchmark requires Linux /proc")
     if args.rounds < 1 or not math.isfinite(args.sample_seconds) or args.sample_seconds <= 0:
         parser.error("rounds and sample seconds must be positive and finite")
-    if args.sample_interval is not None and (not math.isfinite(args.sample_interval) or args.sample_interval <= 0 or args.sample_interval > args.sample_seconds):
-        parser.error("sample interval must be positive, finite and no longer than the sample duration")
+    if args.sample_interval is not None and (not math.isfinite(args.sample_interval) or args.sample_interval <= 0 or args.sample_interval > args.sample_seconds or args.sample_seconds / args.sample_interval > 10_000):
+        parser.error("sample interval must be positive, finite, no longer than duration, and produce at most 10000 samples")
     geometry = (args.window_width, args.window_height, args.scale)
     if any(value is not None for value in geometry) and (any(value is None for value in geometry) or args.window_width <= 0 or args.window_height <= 0 or not math.isfinite(args.scale) or args.scale <= 0):
         parser.error("supply positive width, height and finite scale together")
@@ -335,6 +335,8 @@ def main() -> None:
             "platform": platform.platform(),
             "display": os.environ.get("DISPLAY"),
             "wayland_display": os.environ.get("WAYLAND_DISPLAY"),
+            "slint_backend": os.environ.get("SLINT_BACKEND"),
+            "winit_backend": os.environ.get("WINIT_UNIX_BACKEND"),
         },
         "configuration": {
             "rounds": args.rounds,
