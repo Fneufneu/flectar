@@ -13,8 +13,9 @@ const INBOX_BADGE_SQL: &str = "SELECT t.account_id, COUNT(*)
          WHERE t.unread_count > 0
            AND s.thread_id IS NULL
            AND (EXISTS (
-                SELECT 1 FROM messages m JOIN folders f ON f.id = m.folder_id
-                WHERE m.thread_id = t.id AND f.role = 'inbox'
+                SELECT 1 FROM messages m
+                WHERE m.thread_id = t.id
+                  AND m.folder_id IN (SELECT id FROM folders WHERE role = 'inbox')
            ) OR EXISTS (
                 SELECT 1 FROM messages m
                 JOIN accounts ma ON ma.id = m.account_id AND ma.provider = 'gmail'
@@ -440,6 +441,85 @@ mod tests {
         assert_eq!(badges[0].inbox, 0);
         assert_eq!(badges[0].starred, 0);
         assert_eq!(badges[0].drafts, 1);
+    }
+
+    #[test]
+    fn native_sidebar_badges_count_gmail_links_once_and_exclude_snoozed_inbox() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO accounts (id, email, provider, auth_kind, username,
+             imap_host, imap_port, smtp_host, smtp_port, created_at, sort_order)
+             VALUES (2,'gmail@x.com','gmail','oauth2','gmail','h',993,'h',587,0,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO folders (id, account_id, imap_name, role) VALUES
+             (2,2,'All Mail','all'), (3,2,'INBOX','inbox'), (4,2,'Drafts','drafts')",
+            [],
+        )
+        .unwrap();
+
+        seed_thread(&conn, 1, 1, false);
+        seed_thread(&conn, 2, 1, false);
+        conn.execute("UPDATE threads SET starred_count = 1 WHERE id = 1", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO snoozes (thread_id, account_id, wake_at) VALUES (1,1,9999)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO threads (id, account_id, subject_norm, unread_count, starred_count,
+             last_message_at) VALUES (3,2,'gmail',2,1,1000)",
+            [],
+        )
+        .unwrap();
+        for date in [1000, 1001] {
+            conn.execute(
+                "INSERT INTO messages (thread_id, account_id, folder_id, subject, date)
+                 VALUES (3,2,2,'gmail',?1)",
+                [date],
+            )
+            .unwrap();
+            let message_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO message_folders (message_id, folder_id) VALUES (?1,3)",
+                [message_id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO threads (id, account_id, subject_norm, unread_count, last_message_at)
+             VALUES (4,2,'draft',0,1002)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (thread_id, account_id, folder_id, subject, date, is_draft)
+             VALUES (4,2,4,'draft',1002,1)",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            mailbox_badge_counts(&conn).unwrap(),
+            vec![
+                MailboxBadgeCounts {
+                    account_id: 1,
+                    inbox: 1,
+                    starred: 1,
+                    drafts: 0,
+                },
+                MailboxBadgeCounts {
+                    account_id: 2,
+                    inbox: 1,
+                    starred: 1,
+                    drafts: 1,
+                },
+            ]
+        );
     }
 
     #[test]
