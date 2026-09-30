@@ -217,10 +217,15 @@ pub fn plan_bodystructure(bs: &async_imap::imap_proto::BodyStructure<'_>) -> Mim
         if path.is_empty() {
             "1".into()
         } else {
-            path.iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(".")
+            use std::fmt::Write;
+            let mut section = String::new();
+            for (index, number) in path.iter().enumerate() {
+                if index > 0 {
+                    section.push('.');
+                }
+                write!(&mut section, "{number}").expect("writing to a String cannot fail");
+            }
+            section
         }
     }
 
