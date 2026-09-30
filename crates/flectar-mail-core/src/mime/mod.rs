@@ -1793,9 +1793,8 @@ fn parse_headers(msg: &mail_parser::Message) -> ParsedHeaders {
     }
     if let Some(r) = msg.references().as_text_list() {
         for s in r {
-            let s = s.to_string();
-            if !refs.contains(&s) {
-                refs.push(s);
+            if !refs.iter().any(|reference| reference == s.as_ref()) {
+                refs.push(s.to_string());
             }
         }
     }
@@ -2230,6 +2229,19 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_references_preserve_reply_order_and_skip_repeated_ancestors() {
+        let raw = b"From: a@example.com\r\nIn-Reply-To: <latest@example.com>\r\nReferences: <root@example.com> <latest@example.com> <root@example.com> <middle@example.com>\r\n\r\nbody";
+        assert_eq!(
+            parse_message(raw).unwrap().headers.references,
+            [
+                "latest@example.com",
+                "root@example.com",
+                "middle@example.com"
+            ]
+        );
+    }
 
     #[test]
     fn html_signature_recognizes_bom_case_and_xml_without_decoding() {
