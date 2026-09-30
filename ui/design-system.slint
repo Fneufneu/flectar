@@ -94,22 +94,32 @@ export global AppTheme {
     // Each non-default preset starts from five user-facing foundation colors.
     // The rest of the semantic tokens are derived consistently, so adding a
     // component never expands the persisted theme schema.
-    private property <color> themed-primary: preset == "teal" ? #006b7a
-        : preset == "green" ? #2f6f44
-        : preset == "purple" ? #78418a
-        : dark ? custom-dark-primary : custom-light-primary;
+    out property <color> light-primary: preset == "default" ? #0969da
+        : preset == "teal" ? #006b7a : preset == "green" ? #2f6f44
+        : preset == "purple" ? #78418a : custom-light-primary;
+    out property <color> dark-primary: preset == "default" ? #0969da
+        : preset == "teal" ? #006b7a : preset == "green" ? #2f6f44
+        : preset == "purple" ? #78418a : custom-dark-primary;
+    private property <color> themed-primary: dark ? dark-primary : light-primary;
     private property <color> themed-page-bg: preset == "teal" ? (dark ? #0b1519 : #edf5f7)
         : preset == "green" ? (dark ? #101711 : #f1f5ef)
         : preset == "purple" ? (dark ? #171119 : #f6f1f7)
         : dark ? custom-dark-page-bg : custom-light-page-bg;
-    private property <color> themed-surface: preset == "teal" ? (dark ? #122026 : #fbfefe)
-        : preset == "green" ? (dark ? #182019 : #fcfdfb)
-        : preset == "purple" ? (dark ? #201722 : #fdfbfe)
-        : dark ? custom-dark-surface : custom-light-surface;
-    private property <color> themed-text: preset == "teal" ? (dark ? #e5f0f2 : #173039)
-        : preset == "green" ? (dark ? #e9f0e6 : #213026)
-        : preset == "purple" ? (dark ? #f1e8f3 : #332537)
-        : dark ? custom-dark-text : custom-light-text;
+    // Both schemes are exposed for message appearance independent of the UI.
+    out property <color> light-surface: preset == "default" ? #ffffff
+        : preset == "teal" ? #fbfefe : preset == "green" ? #fcfdfb
+        : preset == "purple" ? #fdfbfe : custom-light-surface;
+    out property <color> dark-surface: preset == "default" ? #18191a
+        : preset == "teal" ? #122026 : preset == "green" ? #182019
+        : preset == "purple" ? #201722 : custom-dark-surface;
+    out property <color> light-text: preset == "default" ? #202120
+        : preset == "teal" ? #173039 : preset == "green" ? #213026
+        : preset == "purple" ? #332537 : custom-light-text;
+    out property <color> dark-text: preset == "default" ? #f3f3f2
+        : preset == "teal" ? #e5f0f2 : preset == "green" ? #e9f0e6
+        : preset == "purple" ? #f1e8f3 : custom-dark-text;
+    private property <color> themed-surface: dark ? dark-surface : light-surface;
+    private property <color> themed-text: dark ? dark-text : light-text;
     private property <color> themed-border: preset == "teal" ? (dark ? #294047 : #c8dadd)
         : preset == "green" ? (dark ? #344039 : #ccd8c8)
         : preset == "purple" ? (dark ? #46354a : #dfd0e2)

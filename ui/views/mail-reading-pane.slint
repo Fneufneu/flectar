@@ -13,6 +13,7 @@ import { LoadingSkeletonBlock } from "../components/loading-skeleton.slint";
 import { RenderingInfoDialog } from "../dialogs/rendering-info-dialog.slint";
 import { TypeScale } from "../typography.slint";
 import { AppTheme, LayoutMetrics, MailIconPalette, MotionSettings } from "../design-system.slint";
+import { MessageColors } from "../message-colors.slint";
 
 component ReaderControl inherits ToolbarIconButton {
     tooltip-above: true;
@@ -351,6 +352,7 @@ export component MailReadingPane inherits Rectangle {
         { id: "rendering_info", title: @tr("About email rendering"), icon: @image-url("../icons/lucide/outline/info.svg") },
         { id: "source", title: root.source_mode ? @tr("Show rendered message") : @tr("Show source"), icon: root.source_mode ? @image-url("../icons/lucide/outline/browser.svg") : @image-url("../icons/lucide/outline/code.svg") },
         { id: "plain_text", title: root.text_mode ? @tr("Show rendered message") : @tr("View plain text"), icon: root.text_mode ? @image-url("../icons/lucide/outline/browser.svg") : @image-url("../icons/lucide/outline/file.svg") },
+        { id: "original_colors", title: MessageColors.original ? @tr("Use message appearance") : @tr("Show original colors"), icon: @image-url("../icons/lucide/outline/contrast.svg") },
         { id: root.trash_view ? "delete_permanently" : "trash", title: root.trash_view ? @tr("Delete permanently…") : @tr("Move to trash"), icon: @image-url("../icons/lucide/outline/trash.svg"), destructive: true },
     ];
     private property <[ActionMenuEntry]> message-action-menu: [
@@ -363,6 +365,7 @@ export component MailReadingPane inherits Rectangle {
         { id: "rendering_info", title: @tr("About email rendering"), icon: @image-url("../icons/lucide/outline/info.svg") },
         { id: "source", title: root.source_mode ? @tr("Show rendered message") : @tr("Show source"), icon: root.source_mode ? @image-url("../icons/lucide/outline/browser.svg") : @image-url("../icons/lucide/outline/code.svg") },
         { id: "plain_text", title: root.text_mode ? @tr("Show rendered message") : @tr("View plain text"), icon: root.text_mode ? @image-url("../icons/lucide/outline/browser.svg") : @image-url("../icons/lucide/outline/file.svg") },
+        { id: "original_colors", title: MessageColors.original ? @tr("Use message appearance") : @tr("Show original colors"), icon: @image-url("../icons/lucide/outline/contrast.svg") },
         { id: "read", title: root.selected_unread ? @tr("Mark as read") : @tr("Mark as unread"), icon: root.selected_unread ? @image-url("../icons/lucide/outline/mail-open.svg") : @image-url("../icons/lucide/outline/mail.svg") },
         { id: "archive", title: @tr("Archive"), icon: @image-url("../icons/lucide/outline/archive.svg") },
         { id: "spam", title: @tr("Move to spam"), icon: @image-url("../icons/lucide/outline/alert.svg") },
@@ -377,6 +380,7 @@ export component MailReadingPane inherits Rectangle {
         { id: "rendering_info", title: @tr("About email rendering"), icon: @image-url("../icons/lucide/outline/info.svg") },
         { id: "source", title: root.source_mode ? @tr("Show rendered message") : @tr("Show source"), icon: root.source_mode ? @image-url("../icons/lucide/outline/browser.svg") : @image-url("../icons/lucide/outline/code.svg") },
         { id: "plain_text", title: root.text_mode ? @tr("Show rendered message") : @tr("View plain text"), icon: root.text_mode ? @image-url("../icons/lucide/outline/browser.svg") : @image-url("../icons/lucide/outline/file.svg") },
+        { id: "original_colors", title: MessageColors.original ? @tr("Use message appearance") : @tr("Show original colors"), icon: @image-url("../icons/lucide/outline/contrast.svg") },
         { id: "read", title: root.selected_unread ? @tr("Mark as read") : @tr("Mark as unread"), icon: root.selected_unread ? @image-url("../icons/lucide/outline/mail-open.svg") : @image-url("../icons/lucide/outline/mail.svg") },
         { id: "archive", title: @tr("Archive"), icon: @image-url("../icons/lucide/outline/archive.svg") },
         { id: "spam", title: @tr("Move to spam"), icon: @image-url("../icons/lucide/outline/alert.svg") },
@@ -914,6 +918,8 @@ export component MailReadingPane inherits Rectangle {
                                     } else if action == "plain_text" {
                                         root.text_mode = !root.text_mode;
                                         if root.text_mode { root.source_mode = false; EmailReader.reader-mode = false; }
+                                    } else if action == "original_colors" {
+                                        MessageColors.original = !MessageColors.original;
                                     } else if action == "read" {
                                         root.message_action(root.selected_unread ? "mark_read" : "mark_unread");
                                     } else {
@@ -1113,6 +1119,7 @@ export component MailReadingPane inherits Rectangle {
                                             }
                                         }
                                         ReaderControl { compact: root.compact; icon: EmailReader.find-open ? @image-url("../icons/lucide/filled/search.svg") : @image-url("../icons/lucide/outline/search.svg"); tooltip-text: @tr("Find in message"); active: EmailReader.find-open; clicked => { EmailReader.find-open = !EmailReader.find-open; if EmailReader.find-open { EmailReader.reader-mode = false; root.text_mode = false; root.source_mode = false; find-input.focus(); } } }
+                                        if !root.compact : ReaderControl { compact: root.compact; icon: @image-url("../icons/lucide/outline/contrast.svg"); tooltip-text: MessageColors.original ? @tr("Use message appearance") : @tr("Show original colors"); active: MessageColors.original; accessible-checked: MessageColors.original; accessible-id: "message-original-colors"; clicked => { MessageColors.original = !MessageColors.original; } }
                                         ReaderControl { compact: root.compact; icon: EmailReader.reader-mode ? @image-url("../icons/lucide/filled/code.svg") : @image-url("../icons/lucide/outline/book.svg"); tooltip-text: EmailReader.reader-mode ? @tr("Show original layout") : @tr("Reader mode"); active: EmailReader.reader-mode; clicked => { EmailReader.reader-mode = !EmailReader.reader-mode; if EmailReader.reader-mode { root.text_mode = false; root.source_mode = false; EmailReader.find-open = false; } } }
                                     }
                                     HorizontalBox {
@@ -1167,6 +1174,12 @@ export component MailReadingPane inherits Rectangle {
                                     // the disabled state into the read-only
                                     // TextEdit and its text cannot be selected.
                                     enabled: root.has_selected;
+
+                                    if root.text_mode : Rectangle {
+                                        width: parent.width; height: parent.height;
+                                        background: MessageColors.background;
+                                        accessible-role: none;
+                                    }
 
                                     if root.remote-images-blocked && !root.text_mode && !root.source_mode && !EmailReader.reader-mode : Rectangle {
                                         x: 12px;
@@ -1354,6 +1367,8 @@ export component MailReadingPane inherits Rectangle {
                                         height: parent.height - 70px;
                                         text: EmailReader.use-authored-text && EmailReader.authored-text != "" ? EmailReader.authored-text : root.selected_plain_text;
                                         read-only: true;
+                                        text-color: MessageColors.foreground;
+                                        background-color: MessageColors.background;
                                         font-size: TypeScale.body-large;
                                     }
 
@@ -1415,7 +1430,7 @@ export component MailReadingPane inherits Rectangle {
                                         MenuItem { title: @tr("Retry images"); activated => { EmailReader.retry-images(); } }
                                         MenuItem { title: @tr("Copy formatted selection"); enabled: root.has_selection; activated => { EmailReader.command("copy-rich"); } }
                                         MenuItem { title: @tr("Caret browsing"); checkable: true; checked: EmailReader.caret-mode; activated => { EmailReader.caret-mode = !EmailReader.caret-mode; } }
-                                        MenuItem { title: @tr("Use dark reader"); checkable: true; checked: EmailReader.dark-reader; activated => { EmailReader.dark-reader = !EmailReader.dark-reader; EmailReader.reader-mode = true; } }
+                                        MenuItem { title: @tr("Show original colors"); checkable: true; checked: MessageColors.original; activated => { MessageColors.original = !MessageColors.original; } }
                                         MenuItem {
                                             title: @tr("Copy selected text");
                                             enabled: root.has_selection;
@@ -1618,7 +1633,7 @@ export component MailReadingPane inherits Rectangle {
                                     width: root.email-viewport-width; height: root.message-body-content-height;
                                     Rectangle {
                                         width: parent.width; height: parent.height;
-                                        background: EmailReader.dark-reader ? #171a21 : root.surface;
+                                        background: MessageColors.background;
                                         border-width: reader-focus.focus-visible ? 2px : 0px;
                                         border-color: root.accent;
                                         accessible-role: none;
@@ -1637,7 +1652,7 @@ export component MailReadingPane inherits Rectangle {
                                                 text: item.name; wrap: word-wrap;
                                                 font-size: item.kind == "heading" ? 22px * EmailReader.zoom : 16px * EmailReader.zoom;
                                                 font-weight: item.kind == "heading" ? 700 : 400;
-                                                color: EmailReader.dark-reader ? #f0f1f4 : root.heading;
+                                                color: MessageColors.foreground;
                                                 accessible-role: text;
                                                 accessible-label: item.kind == "heading" ? @tr("Heading: {}", item.name) : item.name;
                                             }

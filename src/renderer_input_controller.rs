@@ -80,6 +80,27 @@ pub(super) fn register_renderer_input_callbacks(
     gpu: bool,
 ) {
     let weak = app.as_weak();
+    let appearance_renderer = renderer.clone();
+    let appearance_pending = Rc::new(Cell::new(false));
+    app.global::<MessageColors>().on_refresh(move || {
+        if appearance_pending.replace(true) {
+            return;
+        }
+        let weak = weak.clone();
+        let renderer = appearance_renderer.clone();
+        let pending = appearance_pending.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            pending.set(false);
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let colors = crate::message_appearance::EmailAppearance::from_app(&app);
+            if renderer.borrow_mut().set_appearance(colors) {
+                repaint_reader(&app, &renderer, gpu);
+            }
+        });
+    });
+    let weak = app.as_weak();
     let r = renderer.clone();
     app.on_open_email_link(move |url| {
         let Some(app) = weak.upgrade() else {

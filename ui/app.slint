@@ -27,6 +27,7 @@ import { FolderDialog } from "dialogs/folder-dialog.slint";
 import { ConfirmationDialog } from "components/confirmation-dialog.slint";
 import { SettingsDialog } from "dialogs/settings-dialog.slint";
 import { MailView } from "views/mail-view.slint";
+export { MessageColors } from "message-colors.slint";
 export { FilesUi, FileRow, OperationRow } from "views/files-view.slint";
 import { FilesView, FilesUi } from "views/files-view.slint";
 import { ContactsView } from "views/contacts-view.slint";
@@ -158,6 +159,9 @@ export global I18n {
         if (key == "Could not clear suggested people: {}") { return @tr("Could not clear suggested people: {}", argument); }
         if (key == "Theme updated for this session.") { return @tr("Theme updated for this session."); }
         if (key == "Theme preference saved.") { return @tr("Theme preference saved."); }
+        if (key == "Message appearance updated for this session.") { return @tr("Message appearance updated for this session."); }
+        if (key == "Message appearance preference saved.") { return @tr("Message appearance preference saved."); }
+        if (key == "Could not save message appearance: {}") { return @tr("Could not save message appearance: {}", argument); }
         if (key == "Could not save theme: {}") { return @tr("Could not save theme: {}", argument); }
         if (key == "Theme palette updated for this session.") { return @tr("Theme palette updated for this session."); }
         if (key == "Theme palette saved.") { return @tr("Theme palette saved."); }

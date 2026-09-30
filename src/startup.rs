@@ -1,7 +1,7 @@
 //! Background startup snapshot and coalesced core-event ingestion.
 
 use crate::{
-    AppTheme, AppWindow, PAGE_SIZE,
+    AppTheme, AppWindow, MessageColors, PAGE_SIZE,
     calendar::{
         LocalCalendarAccount, LocalCalendarEvent, LocalCalendarSource, calendar_accounts,
         calendar_range_millis, calendar_sources, core_calendar_event,
@@ -630,6 +630,8 @@ pub(crate) fn refresh_oauth_availability(app: &AppWindow) {
 }
 
 pub(crate) fn apply_settings(app: &AppWindow, settings: &Settings) {
+    app.global::<MessageColors>()
+        .set_preference(settings.message_appearance.as_str().into());
     refresh_oauth_availability(app);
     crate::apply_language(app, &settings.language);
     app.set_custom_oauth_configured(

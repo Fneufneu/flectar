@@ -523,6 +523,7 @@ pub(super) fn register_data_management_callbacks(
                     .collect::<HashMap<_, _>>();
                 serde_json::json!({
                     "theme": settings.theme,
+                    "messageAppearance": settings.message_appearance,
                     "showAvatars": settings.show_avatars,
                     "workspaceLayout": settings.workspace_layout,
                     "workspaceListPaneWidth": settings.workspace_list_pane_width,
@@ -734,6 +735,13 @@ pub(super) fn register_data_management_callbacks(
                 {
                     settings.workspace_layout = layout.to_owned();
                 }
+                if let Some(preference) = preferences
+                    .get("messageAppearance")
+                    .and_then(|value| value.as_str())
+                    .and_then(flectar_mail_core::models::MessageAppearance::parse)
+                {
+                    settings.message_appearance = preference;
+                }
                 if let Some(width) = preferences
                     .get("workspaceListPaneWidth")
                     .and_then(|value| value.as_i64())
@@ -910,6 +918,8 @@ pub(super) fn register_data_management_callbacks(
                     .into(),
                 );
                 app.set_monochrome_sidebar_icons(settings.monochrome_sidebar_icons);
+                app.global::<MessageColors>()
+                    .set_preference(settings.message_appearance.as_str().into());
                 app.set_show_avatars(settings.show_avatars);
                 app.set_show_account_markers(settings.show_account_badges);
                 app.set_workspace_layout(settings.workspace_layout.clone().into());
@@ -1022,6 +1032,7 @@ pub(super) fn register_data_management_callbacks(
                     }
                     apply_calendar(&app, &data_reset_calendar.borrow(), today);
                     app.set_theme_mode("system".into());
+                    app.global::<MessageColors>().set_preference("system".into());
                     app.set_monochrome_sidebar_icons(false);
                     app.set_show_avatars(true);
                     app.set_show_account_markers(false);

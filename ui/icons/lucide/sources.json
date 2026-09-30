@@ -48,6 +48,9 @@
     "contacts.svg": {
       "source": "contact-round"
     },
+    "contrast.svg": {
+      "source": "contrast"
+    },
     "copy.svg": {
       "source": "copy"
     },
@@ -264,6 +267,10 @@
     "contact-round": {
       "path": "sources/contact-round.svg",
       "sha256": "82308fedbb3cc0a17571161d12f412fc81f588f49052e9487c28c50593c1faa7"
+    },
+    "contrast": {
+      "path": "sources/contrast.svg",
+      "sha256": "108fdef758c6826d93744257327fc32c66659d0844713c1415e406a8c34d3073"
     },
     "copy": {
       "path": "sources/copy.svg",

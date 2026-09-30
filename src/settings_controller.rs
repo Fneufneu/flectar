@@ -116,9 +116,9 @@ pub(super) fn register_settings_preference_callbacks(
             all_accounts,
             suggest,
         )) {
-            Ok(()) => app.set_sync_status(UiMessage::plain(
-                "Contact suggestion preferences saved.",
-            )),
+            Ok(()) => {
+                app.set_sync_status(UiMessage::plain("Contact suggestion preferences saved."))
+            }
             Err(error) => {
                 if let Ok(settings) = runtime_for_contacts.block_on(core.load_settings()) {
                     app.set_collect_outgoing_contacts(settings.collect_outgoing_contacts);
@@ -149,10 +149,7 @@ pub(super) fn register_settings_preference_callbacks(
         };
         match runtime_for_clear_contacts.block_on(core.clear_contact_suggestions()) {
             Ok(removed) => {
-                app.set_sync_status(UiMessage::detail(
-                    "Cleared {} suggested people.",
-                    removed,
-                ));
+                app.set_sync_status(UiMessage::detail("Cleared {} suggested people.", removed));
                 app.invoke_search_contacts(app.get_contact_search_query());
                 true
             }
@@ -198,6 +195,37 @@ pub(super) fn register_settings_preference_callbacks(
             Ok(()) => app.set_sync_status(UiMessage::plain("Theme palette saved.")),
             Err(error) => {
                 app.set_sync_status(UiMessage::detail("Could not save theme palette: {}", error))
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_for_appearance = Rc::clone(state);
+    let runtime_for_appearance = Rc::clone(runtime);
+    app.global::<MessageColors>().on_choose(move |preference| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        if flectar_mail_core::models::MessageAppearance::parse(&preference).is_none() {
+            return;
+        }
+        let colors = app.global::<MessageColors>();
+        let previous = colors.get_preference();
+        colors.set_preference(preference.clone());
+        let Some(core) = state_for_appearance.borrow().core.clone() else {
+            app.set_sync_status(UiMessage::plain(
+                "Message appearance updated for this session.",
+            ));
+            return;
+        };
+        match runtime_for_appearance.block_on(core.set_message_appearance(&preference)) {
+            Ok(()) => app.set_sync_status(UiMessage::plain("Message appearance preference saved.")),
+            Err(error) => {
+                colors.set_preference(previous);
+                app.set_sync_status(UiMessage::detail(
+                    "Could not save message appearance: {}",
+                    error,
+                ));
             }
         }
     });

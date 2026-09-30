@@ -1,5 +1,6 @@
 import { AccountMailPreferencesPanel } from "../components/account-mail-preferences.slint";
 import { RendererSettings } from "../renderer-settings.slint";
+import { MessageColors } from "../message-colors.slint";
 import { MailSecurityFields } from "../components/mail-security-fields.slint";
 import { OAuthBrowserHelp } from "../components/oauth-browser-help.slint";
 import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
@@ -821,6 +822,30 @@ export component SettingsDialog inherits Rectangle {
 
                             SettingsPageTitle { label: @tr("General"); title-color: root.title-color; }
                             Text { height: root.compact ? 34px : 17px; text: @tr("Manage appearance, privacy, and synchronization."); color: root.secondary-text; font-size: TypeScale.secondary; wrap: word-wrap; }
+
+                            Rectangle {
+                                height: root.compact ? 158px : 96px;
+                                background: root.surface;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: root.border-subtle;
+                                VerticalBox {
+                                    padding: 16px;
+                                    SettingsSelectRow {
+                                        compact: root.compact;
+                                        title: @tr("Message appearance");
+                                        description: @tr("Choose the background and text colors used to read messages.");
+                                        choices: [@tr("Follow app theme"), @tr("Light"), @tr("Dark")];
+                                        selected-index: MessageColors.preference == "light" ? 1
+                                            : MessageColors.preference == "dark" ? 2 : 0;
+                                        title-color: root.body-text;
+                                        description-color: root.secondary-text;
+                                        selected(index, value) => {
+                                            MessageColors.choose(index == 1 ? "light" : index == 2 ? "dark" : "system");
+                                        }
+                                    }
+                                }
+                            }
 
                             theme-editor := ThemeEditor {
                                 compact: root.compact;

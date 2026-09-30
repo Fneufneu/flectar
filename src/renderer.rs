@@ -1,7 +1,10 @@
+#[cfg(test)]
+mod appearance_tests;
 mod interaction;
 #[cfg(test)]
 mod regression;
 mod semantics;
+use crate::message_appearance::{AppearanceDocument, EmailAppearance};
 use anyrender::ImageRenderer;
 #[cfg(test)]
 use anyrender::render_to_buffer;
@@ -11,12 +14,7 @@ use blitz_html::HtmlDocument;
 use blitz_paint::paint_scene;
 use blitz_paint::{PaintCache, paint_scene_cached};
 use blitz_traits::net::NetWaker;
-use blitz_traits::{
-    SmolStr,
-    net::NetProvider,
-    node_id::NodeId,
-    shell::{ColorScheme, Viewport},
-};
+use blitz_traits::{SmolStr, net::NetProvider, node_id::NodeId, shell::Viewport};
 use keyboard_types::Key;
 use parley::layout::PositionedLayoutItem;
 use semantics::*;
@@ -112,6 +110,7 @@ impl InputModifiers {
 
 pub struct PreparedEmail {
     document: HtmlDocument,
+    appearance: AppearanceDocument,
     paint_cache: PaintCache,
     #[cfg(any(feature = "gpu-renderer", test))]
     node_count: usize,
@@ -164,6 +163,7 @@ pub struct GpuEmailRenderer {
     cpu_size: (u32, u32),
     tile_work_limit: usize,
     pub preparation_viewport: (u32, u32, f32),
+    appearance: EmailAppearance,
     pub loaded_key: Option<(u64, bool)>,
     pub zoom: f32,
     pub auto_fit: bool,
@@ -223,6 +223,7 @@ impl Default for GpuEmailRenderer {
             cpu_size: (0, 0),
             tile_work_limit: usize::MAX,
             preparation_viewport: (INITIAL_WIDTH, INITIAL_HEIGHT, 1.0),
+            appearance: EmailAppearance::default(),
             loaded_key: None,
             zoom: 1.0,
             auto_fit: false,
@@ -344,6 +345,7 @@ impl GpuEmailRenderer {
                 self.preparation_viewport.0,
                 self.preparation_viewport.1,
                 self.preparation_viewport.2 * self.zoom,
+                self.appearance,
             )
         }))
         .unwrap_or_else(|_| {
@@ -391,7 +393,17 @@ impl GpuEmailRenderer {
         true
     }
 
-    pub fn set_email(&mut self, email: PreparedEmail) {
+    pub fn set_email(&mut self, mut email: PreparedEmail) {
+        if email.appearance.colors != self.appearance {
+            email.appearance.colors = self.appearance;
+            let mut viewport = email.document.get_viewport();
+            viewport.color_scheme = self.appearance.scheme();
+            email.document.set_viewport(viewport);
+            email.appearance.resolve(&mut email.document);
+            email.links =
+                collect_email_links(&email.document, f32::from_bits(email.resolved_size.3));
+            email.plain_text = collect_plain_text(&email.document);
+        }
         self.fit_viewport = None;
         // Abort and drop the previous document before pruning its resource
         // state. A late decode sees the abort signal and cannot reinsert it.
@@ -436,6 +448,21 @@ impl GpuEmailRenderer {
         self.click_count = 0;
         self.last_pointer_down = None;
         self.update_image_priorities();
+    }
+
+    /// Change presentation without reparsing the message or refetching images.
+    pub(crate) fn set_appearance(&mut self, colors: EmailAppearance) -> bool {
+        if self.appearance == colors {
+            return false;
+        }
+        self.appearance = colors;
+        if let Some(email) = self.email.as_mut() {
+            email.appearance.colors = colors;
+        }
+        self.dirty = true;
+        self.fit_viewport = None;
+        self.tiles.clear();
+        true
     }
 
     /// Keep the document, selection and scroll position, but release pixels
@@ -761,9 +788,9 @@ impl GpuEmailRenderer {
             width.max(1),
             height.max(1),
             1.0,
-            ColorScheme::Light,
+            email.appearance.colors.scheme(),
         ));
-        email.document.resolve(0.0);
+        email.appearance.resolve(&mut email.document);
         email.paint_cache.clear();
         let natural = content_surface_width(&email.document, width.max(1) as f32);
         // Reflowable prose and table cells are handled by the user-agent
@@ -885,11 +912,12 @@ impl GpuEmailRenderer {
                 physical_width,
                 physical_height,
                 scale_factor,
-                ColorScheme::Light,
+                email.appearance.colors.scheme(),
             ));
-            email.document.resolve(0.0);
+            email.appearance.resolve(&mut email.document);
             email.paint_cache.clear();
             email.links = collect_email_links(&email.document, logical_width.max(1) as f32);
+            email.plain_text = collect_plain_text(&email.document);
             self.content_height = content_surface_height(&email.document);
             self.layout_width =
                 content_surface_width(&email.document, logical_width as f32) * self.zoom;
@@ -1054,11 +1082,12 @@ impl GpuEmailRenderer {
                 physical_width,
                 physical_height,
                 scale_factor,
-                ColorScheme::Light,
+                email.appearance.colors.scheme(),
             ));
-            email.document.resolve(0.0);
+            email.appearance.resolve(&mut email.document);
             email.paint_cache.clear();
             email.links = collect_email_links(&email.document, logical_width);
+            email.plain_text = collect_plain_text(&email.document);
             self.content_height = content_surface_height(&email.document);
             self.layout_width = content_surface_width(&email.document, logical_width) * self.zoom;
             if self.content_height >= MAX_EMAIL_SURFACE_HEIGHT
@@ -1141,7 +1170,7 @@ impl GpuEmailRenderer {
                     &self.scene,
                     &texture_view,
                     &vello::RenderParams {
-                        base_color: vello::peniko::Color::WHITE,
+                        base_color: email.appearance.colors.canvas(),
                         width: physical_width,
                         height: physical_tile_height,
                         antialiasing_method: vello::AaConfig::Area,
@@ -1228,9 +1257,9 @@ pub fn render_prepared_cpu(
         physical_width,
         physical_height,
         scale_factor,
-        ColorScheme::Light,
+        email.appearance.colors.scheme(),
     ));
-    email.document.resolve(0.0);
+    email.appearance.resolve(&mut email.document);
     email.paint_cache.clear();
     email.links = collect_email_links(&email.document, logical_width.max(1) as f32);
     let rendered_height = content_surface_height(&email.document);
@@ -1344,7 +1373,7 @@ fn render_cpu_tile_cached(
 
     // Blitz may leave pixels beyond the document's own painted boxes
     // transparent. Every tile represents an opaque browser canvas.
-    composite_over_white(pixels.make_mut_bytes());
+    composite_over_canvas(pixels.make_mut_bytes(), email.appearance.colors.canvas());
     if let (Some(start), Some(rendered)) = (start, rendered) {
         eprintln!(
             "email tile {index}: scene+encode={:.2}ms raster+cache={:.2}ms composite={:.2}ms",
@@ -1526,13 +1555,16 @@ fn content_surface_height(document: &HtmlDocument) -> f32 {
         .clamp(MIN_EMAIL_SURFACE_HEIGHT, MAX_EMAIL_SURFACE_HEIGHT)
 }
 
-fn composite_over_white(rgba: &mut [u8]) {
+fn composite_over_canvas(rgba: &mut [u8], background: blitz_dom::util::Color) {
+    let [r, g, b, _] = background.components;
+    let canvas = [r, g, b].map(|channel| (channel * 255.0).round() as u16);
     for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel[3]);
         if alpha < 255 {
             let inverse = 255 - alpha;
-            for channel in &mut pixel[..3] {
-                *channel = (u16::from(*channel) + inverse).min(255) as u8;
+            for (channel, background) in pixel[..3].iter_mut().zip(canvas) {
+                *channel =
+                    (u16::from(*channel) + (background * inverse + 127) / 255).min(255) as u8;
             }
             pixel[3] = 255;
         }
@@ -1632,7 +1664,14 @@ fn prepare_email_html_with_provider(
     html: &str,
     net_provider: Option<Arc<dyn NetProvider>>,
 ) -> Result<PreparedEmail, String> {
-    prepare_email_html_at(html, net_provider, INITIAL_WIDTH, INITIAL_HEIGHT, 1.0)
+    prepare_email_html_at(
+        html,
+        net_provider,
+        INITIAL_WIDTH,
+        INITIAL_HEIGHT,
+        1.0,
+        EmailAppearance::default(),
+    )
 }
 fn prepare_email_html_at(
     html: &str,
@@ -1640,6 +1679,7 @@ fn prepare_email_html_at(
     width: u32,
     height: u32,
     scale: f32,
+    appearance: EmailAppearance,
 ) -> Result<PreparedEmail, String> {
     prepare_email_html_at_with_font_ctx(
         html,
@@ -1648,6 +1688,7 @@ fn prepare_email_html_at(
         height,
         scale,
         build_email_font_ctx(),
+        appearance,
     )
 }
 
@@ -1656,7 +1697,15 @@ fn prepare_email_html_with_font_ctx(
     html: &str,
     font_ctx: parley::FontContext,
 ) -> Result<PreparedEmail, String> {
-    prepare_email_html_at_with_font_ctx(html, None, INITIAL_WIDTH, INITIAL_HEIGHT, 1.0, font_ctx)
+    prepare_email_html_at_with_font_ctx(
+        html,
+        None,
+        INITIAL_WIDTH,
+        INITIAL_HEIGHT,
+        1.0,
+        font_ctx,
+        EmailAppearance::default(),
+    )
 }
 
 fn prepare_email_html_at_with_font_ctx(
@@ -1666,6 +1715,7 @@ fn prepare_email_html_at_with_font_ctx(
     height: u32,
     scale: f32,
     font_ctx: parley::FontContext,
+    appearance: EmailAppearance,
 ) -> Result<PreparedEmail, String> {
     let started = render_timings_enabled().then(Instant::now);
     let (html, notice) = crate::email_document::bounded_html(html);
@@ -1683,7 +1733,7 @@ fn prepare_email_html_at_with_font_ctx(
         &html,
         DocumentConfig {
             image_decode_limits: Some(crate::remote::image_decode_limits()),
-            viewport: Some(Viewport::new(width, height, scale, ColorScheme::Light)),
+            viewport: Some(Viewport::new(width, height, scale, appearance.scheme())),
             net_provider,
             abort_signal: Some(abort.0.as_ref().unwrap().signal.clone()),
             font_ctx: Some(font_ctx),
@@ -1703,7 +1753,8 @@ fn prepare_email_html_at_with_font_ctx(
             stack.extend(node.children.iter().map(|id| (*id, depth + 1)));
         }
     }
-    document.resolve(0.0);
+    let mut appearance = AppearanceDocument::new(appearance);
+    appearance.resolve(&mut document);
     let links = collect_email_links(&document, width as f32 / scale);
     let plain_text = collect_plain_text(&document);
 
@@ -1716,6 +1767,7 @@ fn prepare_email_html_at_with_font_ctx(
 
     Ok(PreparedEmail {
         document,
+        appearance,
         paint_cache: PaintCache::default(),
         #[cfg(any(feature = "gpu-renderer", test))]
         node_count: count,
@@ -1957,8 +2009,8 @@ fn painted_point(document: &HtmlDocument, mut id: NodeId, mut x: f32, mut y: f32
 #[cfg(test)]
 mod tests {
     use super::{
-        GpuEmailRenderer, InputModifiers, VelloCpuImageRenderer, composite_over_white, paint_scene,
-        prepare_email_html, render_prepared_cpu, render_to_buffer,
+        GpuEmailRenderer, InputModifiers, VelloCpuImageRenderer, composite_over_canvas,
+        paint_scene, prepare_email_html, render_prepared_cpu, render_to_buffer,
     };
     use crate::mail::fixtures;
 
@@ -2110,7 +2162,7 @@ mod tests {
     #[test]
     fn software_canvas_is_composited_over_opaque_white() {
         let mut rgba = vec![0, 0, 0, 0, 200, 100, 50, 128];
-        composite_over_white(&mut rgba);
+        composite_over_canvas(&mut rgba, blitz_dom::util::Color::WHITE);
 
         assert_eq!(&rgba[..4], &[255, 255, 255, 255]);
         assert_eq!(rgba[7], 255);

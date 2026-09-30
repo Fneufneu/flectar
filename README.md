@@ -115,6 +115,12 @@ three-pane layout, switch to a streamlined minimal view, choose a light or dark
 theme, select a built-in color palette or create a custom one, and show or hide
 sender avatars.
 
+Message appearance can follow the app theme or stay light or dark independently.
+It uses your selected color palette for HTML, plain text, and Reader mode.
+To temporarily show the sender's original colors, use the contrast icon between
+Find and Reader mode in the desktop message toolbar, or choose **Show original
+colors** from the message's three-dot menu on any screen size.
+
 The full workspace keeps your folders, message list, and selected email visible
 together. The minimal layout reduces visual noise and gives each part of your
 inbox more room when you need it.

@@ -50,12 +50,17 @@ mod tests {
         assert_eq!(d.workspace_layout, "default");
         assert_eq!(d.calendar_week_start, "monday");
         assert_eq!(d.theme_preset, "default");
+        assert_eq!(
+            d.message_appearance,
+            crate::models::MessageAppearance::System
+        );
         assert_eq!(d.custom_theme.light_primary, "#0969DA");
         assert!(d.mail_profiles.is_empty());
         assert!(!d.show_account_badges);
 
         let mut s = d.clone();
         s.theme = "carbon".into();
+        s.message_appearance = crate::models::MessageAppearance::Light;
         s.calendar_week_start = "sunday".into();
         s.notifications_enabled = false;
         s.monochrome_sidebar_icons = true;
@@ -99,6 +104,10 @@ mod tests {
 
         let back = get(&c).unwrap();
         assert_eq!(back.theme, "carbon");
+        assert_eq!(
+            back.message_appearance,
+            crate::models::MessageAppearance::Light
+        );
         assert_eq!(back.calendar_week_start, "sunday");
         assert!(!back.notifications_enabled);
         assert!(back.monochrome_sidebar_icons);

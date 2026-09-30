@@ -552,7 +552,7 @@ fn culled_text_tiles_match_a_full_surface() {
                 tiled.width,
                 tiled.height,
             );
-            composite_over_white(&mut full);
+            composite_over_canvas(&mut full, email.appearance.colors.canvas());
             let mut offset = 0;
             for tile in &tiled.tiles {
                 let pixels = tile.image.to_rgba8().unwrap();
@@ -728,7 +728,7 @@ fn premultiplied_alpha_matches_white_canvas() {
         100,
         100,
     );
-    composite_over_white(&mut pixels);
+    composite_over_canvas(&mut pixels, email.appearance.colors.canvas());
     let pixel = &pixels[(10 * 100 + 10) * 4..(10 * 100 + 10) * 4 + 4];
     assert_eq!(pixel[0], 255);
     assert!((126..=129).contains(&pixel[1]));

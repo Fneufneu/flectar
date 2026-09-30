@@ -154,6 +154,7 @@ pub(super) fn email_viewport_size(app: &AppWindow) -> (u32, u32) {
 /// Remove every actionable part of the previous body on empty/error transitions.
 /// Source and fallback text are owned by the caller and remain readable.
 pub(super) fn clear_reader_projection(app: &AppWindow) {
+    app.global::<MessageColors>().set_original(false);
     app.global::<AccountMailPreferences>().invoke_close_reader();
     let reader = app.global::<EmailReader>();
     reader.set_available(false);
@@ -203,6 +204,7 @@ pub(super) fn apply_email(
         0.0
     };
     if !same_message {
+        app.global::<MessageColors>().set_original(false);
         app.global::<AccountMailPreferences>().invoke_close_reader();
         reader.set_auto_fit(true);
         email_renderer.borrow_mut().set_auto_fit(true);
@@ -222,6 +224,9 @@ pub(super) fn apply_email(
         preview
     );
     let html = email.html.as_deref().unwrap_or(&fallback_html);
+    email_renderer
+        .borrow_mut()
+        .set_appearance(crate::message_appearance::EmailAppearance::from_app(app));
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     html.hash(&mut hash);

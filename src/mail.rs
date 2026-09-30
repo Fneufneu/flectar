@@ -820,6 +820,17 @@ impl CoreMailSource {
             .map_err(|error| error.to_string())
     }
 
+    pub async fn set_message_appearance(&self, preference: &str) -> Result<(), String> {
+        let preference = flectar_mail_core::models::MessageAppearance::parse(preference)
+            .ok_or("Unknown message appearance")?;
+        let mut settings = self.load_settings().await?;
+        settings.message_appearance = preference;
+        self.core
+            .set_settings(settings)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn set_custom_theme(&self, custom_theme: CustomTheme) -> Result<(), String> {
         let mut settings = self.load_settings().await?;
         settings.custom_theme = custom_theme;

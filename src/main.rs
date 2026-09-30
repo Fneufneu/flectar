@@ -24,6 +24,7 @@ mod mail_render_projection;
 mod mail_setup;
 mod mail_view_model;
 mod mail_work;
+mod message_appearance;
 mod oauth_browser;
 pub mod pdf_preview;
 mod preview_controls;

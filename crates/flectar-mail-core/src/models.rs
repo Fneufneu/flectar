@@ -1147,10 +1147,41 @@ pub struct MailProfile {
     pub account_ids: Vec<i64>,
 }
 
+/// The reading surface follows the application unless explicitly overridden.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageAppearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl MessageAppearance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub theme: String,
+    #[serde(default)]
+    pub message_appearance: MessageAppearance,
     /// Named application palette: "default" | "teal" | "green" | "purple" | "custom".
     #[serde(default = "default_theme_preset")]
     pub theme_preset: String,
@@ -1434,6 +1465,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             theme: "system".into(),
+            message_appearance: MessageAppearance::default(),
             theme_preset: default_theme_preset(),
             custom_theme: CustomTheme::default(),
             show_avatars: true,
@@ -1745,6 +1777,7 @@ mod tests {
         assert!(s.signature_list.is_empty());
         assert_eq!(s.ai_base_url, crate::ai::DEFAULT_BASE_URL);
         assert!(s.show_avatars);
+        assert_eq!(s.message_appearance, MessageAppearance::System);
         assert!(s.group_mail_by_date);
         assert_eq!(s.workspace_layout, "default");
         assert_eq!(s.workspace_list_pane_width, MIN_WORKSPACE_LIST_PANE_WIDTH);

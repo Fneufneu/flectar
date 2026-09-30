@@ -85,6 +85,8 @@ export component TextEdit inherits Rectangle {
     in property <string> placeholder-text;
     in property <bool> enabled: true;
     in property <bool> read-only: false;
+    in property <color> text-color: AppTheme.heading;
+    in property <color> background-color: AppTheme.input-bg;
     in property <length> font-size: TypeScale.body;
     callback edited(string);
     callback select-all;
@@ -95,7 +97,7 @@ export component TextEdit inherits Rectangle {
     border-radius: LayoutMetrics.corner-radius - 2px;
     border-width: 1px;
     border-color: editor.has-focus ? AppTheme.accent : AppTheme.input-border;
-    background: AppTheme.input-bg;
+    background: root.background-color;
     opacity: root.enabled ? 1 : 0.5;
 
     Text {
@@ -115,7 +117,7 @@ export component TextEdit inherits Rectangle {
         width: parent.width - 24px;
         height: parent.height - 20px;
         text: root.text;
-        color: AppTheme.heading;
+        color: root.text-color;
         selection-background-color: AppTheme.accent;
         selection-foreground-color: white;
         font-size: root.font-size;

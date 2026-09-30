@@ -74,6 +74,9 @@ percent-encoding = "2"
 data-url = "0.3"
 html5ever = "0.39"
 cssparser = "0.37"
+# Match Blitz's Stylo version when adapting resolved CSS colors and gradients.
+style = { package = "stylo", version = "=0.20.0" }
+style_traits = { package = "stylo_traits", version = "=0.20.0" }
 unicode-segmentation = "1.13"
 # Backport of upstream emoji presentation selection; see patches/parley.
 parley = "=0.11.1"

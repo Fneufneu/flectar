@@ -34,10 +34,12 @@ fn automatic_selection_hydrates_and_reader_controls_are_responsive_and_keyboard_
     app.set_active_view("mail".into());
     app.window().set_size(slint::PhysicalSize::new(1280, 900));
     app.show().unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = Rc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let (fav, _) = bounded_ui_channel();
     let (avatars, _) = bounded_ui_channel();
@@ -75,6 +77,7 @@ fn automatic_selection_hydrates_and_reader_controls_are_responsive_and_keyboard_
     app.set_emails(state.email_rows.clone().into());
     app.set_sidebar_rows(Rc::clone(&state.sidebar_rows).into());
     let state = Rc::new(RefCell::new(state));
+    register_settings_preference_callbacks(&app, &state, &runtime);
     render_current(&app, &state, &runtime).unwrap();
     assert_eq!(requests.borrow().last(), Some(&ids[0]));
     let sidebar = app.get_sidebar_rows();
@@ -86,8 +89,13 @@ fn automatic_selection_hydrates_and_reader_controls_are_responsive_and_keyboard_
         "selecting a message must not rebuild unchanged folders"
     );
     // Archive removes the current row, and render_current chooses the next.
+    app.global::<MessageColors>().set_original(true);
     state.borrow_mut().messages.remove(0);
     render_current(&app, &state, &runtime).unwrap();
+    assert!(
+        !app.global::<MessageColors>().get_original(),
+        "original colors apply only to the current message"
+    );
     assert_eq!(requests.borrow().last(), Some(&ids[1]));
     assert_eq!(app.global::<EmailReader>().get_message_id(), ids[1]);
     assert!(
@@ -285,7 +293,31 @@ fn automatic_selection_hydrates_and_reader_controls_are_responsive_and_keyboard_
     assert!(renderer.borrow().zoom > 1.0);
     app.set_theme_mode("dark".into());
     draw("desktop-dark", 1280, 900);
+    assert!(app.global::<MessageColors>().get_dark());
+    let source = app.get_selected_source();
+    let selection = renderer.borrow().selected_text();
+    let loaded_key = renderer.borrow().loaded_key;
+    let tile_count = renderer.borrow().tile_count;
+    app.global::<MessageColors>().set_original(true);
+    draw("message-original-colors", 1280, 900);
+    assert_eq!(app.get_selected_source(), source);
+    assert_eq!(renderer.borrow().selected_text(), selection);
+    assert_eq!(renderer.borrow().loaded_key, loaded_key);
+    assert!(renderer.borrow().tile_count > tile_count);
+    app.global::<MessageColors>().set_original(false);
+    draw("message-adapted-colors", 1280, 900);
+    assert_eq!(renderer.borrow().selected_text(), selection);
+    app.global::<MessageColors>().invoke_choose("light".into());
+    draw("message-light-in-dark-app", 1280, 900);
+    assert!(!app.global::<MessageColors>().get_dark());
+    app.global::<MessageColors>()
+        .invoke_choose("unsupported".into());
+    assert_eq!(app.global::<MessageColors>().get_preference(), "light");
     app.set_theme_mode("light".into());
+    app.global::<MessageColors>().invoke_choose("dark".into());
+    draw("message-dark-in-light-app", 1280, 900);
+    assert!(app.global::<MessageColors>().get_dark());
+    app.global::<MessageColors>().invoke_choose("system".into());
     draw("phone-list", 390, 844);
     pointer(30.0, 30.0);
     draw("phone-folders", 390, 844);
@@ -307,7 +339,7 @@ fn automatic_selection_hydrates_and_reader_controls_are_responsive_and_keyboard_
     draw("tablet", 768, 1024);
     draw("phone-landscape", 844, 390);
     app.global::<EmailReader>().set_reader_mode(true);
-    app.global::<EmailReader>().set_dark_reader(true);
+    app.global::<MessageColors>().set_preference("dark".into());
     app.set_theme_mode("dark".into());
     draw("reader-dark", 390, 844);
     draw("reader-desktop", 1280, 900);
