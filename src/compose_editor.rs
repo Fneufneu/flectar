@@ -545,21 +545,25 @@ impl CosmicComposeEditor {
         tile_height: u32,
         style: ComposeEditorStyle,
     ) -> Image {
-        let mut canvas = TileCanvas::new(width, tile_height, tile_start);
-        let editor = &self.editor;
-        let mut renderer = TileRenderer {
-            font_system: &mut self.font_system,
-            swash_cache: &mut self.swash_cache,
-            canvas: &mut canvas,
-        };
-        editor.render(
-            &mut renderer,
-            cosmic_color(style.text),
-            CosmicColor::rgba(0, 0, 0, 0),
-            cosmic_color(style.selection),
-            cosmic_color(style.selected_text),
-        );
-        canvas.into_image()
+        let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, tile_height);
+        {
+            let mut canvas =
+                TileCanvas::new(width, tile_height, tile_start, pixels.make_mut_bytes());
+            let editor = &self.editor;
+            let mut renderer = TileRenderer {
+                font_system: &mut self.font_system,
+                swash_cache: &mut self.swash_cache,
+                canvas: &mut canvas,
+            };
+            editor.render(
+                &mut renderer,
+                cosmic_color(style.text),
+                CosmicColor::rgba(0, 0, 0, 0),
+                cosmic_color(style.selection),
+                cosmic_color(style.selected_text),
+            );
+        }
+        Image::from_rgba8_premultiplied(pixels)
     }
 
     fn next_click_count(&mut self, x: f32, y: f32) -> u8 {
@@ -738,23 +742,20 @@ fn cosmic_color(color: Color) -> CosmicColor {
     CosmicColor::rgba(color.red(), color.green(), color.blue(), color.alpha())
 }
 
-struct TileCanvas {
+struct TileCanvas<'a> {
     width: u32,
     height: u32,
     y_offset: u32,
-    pixels: Vec<u8>,
+    pixels: &'a mut [u8],
 }
 
-impl TileCanvas {
-    fn new(width: u32, height: u32, y_offset: u32) -> Self {
-        let len = (width as usize)
-            .saturating_mul(height as usize)
-            .saturating_mul(4);
+impl<'a> TileCanvas<'a> {
+    fn new(width: u32, height: u32, y_offset: u32, pixels: &'a mut [u8]) -> Self {
         Self {
             width,
             height,
             y_offset,
-            pixels: vec![0; len],
+            pixels,
         }
     }
 
@@ -788,24 +789,15 @@ impl TileCanvas {
             }
         }
     }
-
-    fn into_image(self) -> Image {
-        let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-            &self.pixels,
-            self.width,
-            self.height,
-        );
-        Image::from_rgba8_premultiplied(pixels)
-    }
 }
 
-struct TileRenderer<'a> {
+struct TileRenderer<'a, 'pixels> {
     font_system: &'a mut FontSystem,
     swash_cache: &'a mut SwashCache,
-    canvas: &'a mut TileCanvas,
+    canvas: &'a mut TileCanvas<'pixels>,
 }
 
-impl Renderer for TileRenderer<'_> {
+impl Renderer for TileRenderer<'_, '_> {
     fn rectangle(&mut self, x: i32, y: i32, width: u32, height: u32, color: CosmicColor) {
         self.canvas.rectangle(x, y, width, height, color);
     }
