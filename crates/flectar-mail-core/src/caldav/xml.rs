@@ -282,11 +282,14 @@ pub fn propfind_ctag() -> String {
 }
 
 pub fn report_sync_collection(token: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<d:sync-collection xmlns:d="DAV:"><d:sync-token>{}</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>"#,
-        xml_escape(token)
-    )
+    const PREFIX: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:sync-collection xmlns:d="DAV:"><d:sync-token>"#;
+    const SUFFIX: &str = r#"</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>"#;
+    let mut output = String::with_capacity(PREFIX.len() + escaped_len(token) + SUFFIX.len());
+    output.push_str(PREFIX);
+    append_escaped(&mut output, token);
+    output.push_str(SUFFIX);
+    output
 }
 
 /// Lists every VEVENT resource in a collection (etags only). Deliberately
