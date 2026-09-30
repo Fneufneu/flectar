@@ -28,12 +28,13 @@ pub struct Multistatus {
     pub sync_token: Option<String>,
 }
 
-fn local(value: &str) -> String {
-    value
-        .rsplit(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
+fn local(value: &str) -> std::borrow::Cow<'_, str> {
+    let name = value.rsplit(':').next().unwrap_or("");
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        std::borrow::Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
 }
 fn status(value: &str) -> u16 {
     value
@@ -94,8 +95,9 @@ pub fn parse(body: &str) -> Result<Multistatus> {
                 if path.len() >= MAX_DEPTH {
                     return Err(super::err("XML nesting limit exceeded"));
                 }
-                let name = local(e.name().as_ref());
-                match name.as_str() {
+                let qualified_name = e.name();
+                let name = local(qualified_name.as_ref());
+                match name.as_ref() {
                     "response" => {
                         current = Some(Item::default());
                         direct_status = None;
@@ -129,18 +131,19 @@ pub fn parse(body: &str) -> Result<Multistatus> {
                     }
                     _ => {}
                 }
-                path.push(name);
+                path.push(name.into_owned());
                 text.clear();
             }
             Event::Empty(e) => {
-                let name = local(e.name().as_ref());
+                let qualified_name = e.name();
+                let name = local(qualified_name.as_ref());
                 if name == "addressbook"
                     && path.last().is_some_and(|v| v == "resourcetype")
                     && let Some(item) = props.as_mut().or(current.as_mut())
                 {
                     item.is_addressbook = true;
                 }
-                if matches!(name.as_str(), "write" | "write-content" | "all")
+                if matches!(name.as_ref(), "write" | "write-content" | "all")
                     && path
                         .iter()
                         .any(|value| value == "current-user-privilege-set")
@@ -166,10 +169,11 @@ pub fn parse(body: &str) -> Result<Multistatus> {
                 }
             }
             Event::End(e) => {
-                let name = local(e.name().as_ref());
+                let qualified_name = e.name();
+                let name = local(qualified_name.as_ref());
                 path.pop();
                 let value = text.trim();
-                match name.as_str() {
+                match name.as_ref() {
                     "response" => {
                         if let Some(mut item) = current.take() {
                             if out.items.len() >= MAX_ITEMS {
@@ -287,11 +291,6 @@ fn append_escaped(output: &mut String, value: &str) {
     }
 }
 
-fn escape(value: &str) -> String {
-    let mut output = String::with_capacity(escaped_len(value));
-    append_escaped(&mut output, value);
-    output
-}
 pub fn principal() -> String {
     r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#.into()
 }
