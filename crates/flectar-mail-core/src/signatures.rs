@@ -44,19 +44,20 @@ pub fn text_html(text: &str) -> String {
 
 /// Insert above the quotation, preserving the standard `-- ` delimiter.
 pub fn insert(body: &str, signature: &str) -> String {
-    if signature.trim().is_empty() {
+    let signature = signature.trim();
+    if signature.is_empty() {
         return body.to_owned();
     }
     let at = body
         .find("\n\nOn ")
         .or_else(|| body.find("\n\n---------- Forwarded message"))
         .unwrap_or(body.len());
-    format!(
-        "{}\n\n-- \n{}{}",
-        &body[..at],
-        signature.trim(),
-        &body[at..]
-    )
+    let mut result = String::with_capacity(body.len() + signature.len() + 6);
+    result.push_str(&body[..at]);
+    result.push_str("\n\n-- \n");
+    result.push_str(signature);
+    result.push_str(&body[at..]);
+    result
 }
 
 impl Core {
