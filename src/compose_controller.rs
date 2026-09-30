@@ -193,10 +193,17 @@ fn append_address(output: &mut String, address: &flectar_mail_core::models::Addr
         .filter(|name| !name.is_empty())
     {
         Some(name) => {
-            let name = name
-                .chars()
-                .filter(|character| !matches!(character, ',' | ';' | '<' | '>' | '\r' | '\n'))
-                .collect::<String>();
+            let name = if name.contains([',', ';', '<', '>', '\r', '\n']) {
+                std::borrow::Cow::Owned(
+                    name.chars()
+                        .filter(|character| {
+                            !matches!(character, ',' | ';' | '<' | '>' | '\r' | '\n')
+                        })
+                        .collect::<String>(),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(name)
+            };
             output.push_str(name.trim());
             output.push_str(" <");
             output.push_str(&address.email);
