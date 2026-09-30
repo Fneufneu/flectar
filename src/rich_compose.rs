@@ -147,8 +147,8 @@ impl RichComposeDocument {
         self.revision
     }
 
-    pub(crate) fn style_runs(&self) -> Vec<ComposeStyleRun> {
-        self.styles.clone()
+    pub(crate) fn style_runs(&self) -> &[ComposeStyleRun] {
+        &self.styles
     }
 
     pub(crate) fn typing_style(&self) -> &CharacterStyle {

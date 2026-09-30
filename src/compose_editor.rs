@@ -706,7 +706,7 @@ fn rich_spans(
     let preedit_attrs = character_attrs(default_attrs, document.typing_style(), link_color)
         .underline(UnderlineStyle::Single);
 
-    for run in &runs {
+    for run in runs {
         let attrs = character_attrs(default_attrs, &run.style, link_color);
         if !inserted_preedit && preedit_offset <= run.range.start {
             push_span(&mut spans, preedit_text, preedit_attrs.clone());
