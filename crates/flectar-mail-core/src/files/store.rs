@@ -19,12 +19,35 @@ pub async fn operations(db: &Db, account: i64) -> Result<Vec<Operation>> {
         let rows=query.query_map([account],|r|{
             let payload=r.get::<_,String>(5)?;
             let payload=serde_json::from_str::<serde_json::Value>(&payload).unwrap_or_default();
-            let name=payload["stagedName"].as_str().or_else(||payload["node"]["name"].as_str()).or_else(||payload["a"].as_str()).unwrap_or("");
-            let folder=payload["history"].as_array().into_iter().flatten().filter_map(|n|n["name"].as_str()).collect::<Vec<_>>().join(" / ");
-            Ok(Operation{id:r.get(0)?,action:r.get(1)?,state:r.get(2)?,error:r.get(3)?,bytes:r.get::<_,i64>(4)?.max(0) as u64,description:format!("/{folder} · {name}")})
+            Ok(Operation{id:r.get(0)?,action:r.get(1)?,state:r.get(2)?,error:r.get(3)?,bytes:r.get::<_,i64>(4)?.max(0) as u64,description:operation_description(&payload)})
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }).await
+}
+
+fn operation_description(payload: &serde_json::Value) -> String {
+    let name = payload["stagedName"]
+        .as_str()
+        .or_else(|| payload["node"]["name"].as_str())
+        .or_else(|| payload["a"].as_str())
+        .unwrap_or("");
+    let mut description = String::from("/");
+    let mut first = true;
+    for folder in payload["history"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node["name"].as_str())
+    {
+        if !first {
+            description.push_str(" / ");
+        }
+        description.push_str(folder);
+        first = false;
+    }
+    description.push_str(" · ");
+    description.push_str(name);
+    description
 }
 
 impl Core {
