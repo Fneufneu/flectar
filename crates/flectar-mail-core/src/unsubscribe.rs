@@ -10,7 +10,7 @@
 //! non-2xx (including 3xx) as failure.
 
 use crate::error::{CoreError, Result};
-use crate::mime::{is_one_click_post, parse_unsubscribe_uris};
+use crate::mime::{is_one_click_post, unsubscribe_uris};
 use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
@@ -39,36 +39,29 @@ pub fn plan(
     list_unsubscribe: &str,
     list_unsubscribe_post: Option<&str>,
 ) -> Option<UnsubscribePlan> {
-    let uris = parse_unsubscribe_uris(list_unsubscribe);
-    let web = uris
-        .iter()
-        .find(|u| {
-            let l = u.to_ascii_lowercase();
-            l.starts_with("https://") || l.starts_with("http://")
-        })
-        .cloned();
+    let mut uris = unsubscribe_uris(list_unsubscribe);
+    let web = uris.clone().find(|u| {
+        let l = u.to_ascii_lowercase();
+        l.starts_with("https://") || l.starts_with("http://")
+    });
     let one_click = list_unsubscribe_post.is_some_and(is_one_click_post);
 
     // RFC 8058 is https-only; a one-click marker on an http:// URI is ignored.
-    if one_click
-        && let Some(url) = web
-            .as_deref()
-            .filter(|u| u.to_ascii_lowercase().starts_with("https://"))
-    {
+    if one_click && let Some(url) = web.filter(|u| u.to_ascii_lowercase().starts_with("https://")) {
         return Some(UnsubscribePlan::OneClick {
             url: url.to_string(),
         });
     }
 
-    if let Some(m) = uris
-        .iter()
-        .find(|u| u.to_ascii_lowercase().starts_with("mailto:"))
+    if let Some(m) = uris.find(|u| u.to_ascii_lowercase().starts_with("mailto:"))
         && let Some(p) = parse_mailto(m)
     {
         return Some(p);
     }
 
-    web.map(|url| UnsubscribePlan::Browser { url })
+    web.map(|url| UnsubscribePlan::Browser {
+        url: url.to_owned(),
+    })
 }
 
 /// Parse `mailto:addr?subject=…&body=…` into a Mailto plan. Subject defaults
