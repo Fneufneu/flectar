@@ -1666,10 +1666,10 @@ fn first_raw_header(msg: &mail_parser::Message, name: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AuthenticationResult {
-    method: String,
-    result: String,
-    properties: Vec<(String, String)>,
+struct AuthenticationResult<'a> {
+    method: &'a str,
+    result: &'a str,
+    properties: Vec<(&'a str, &'a str)>,
 }
 
 /// Remove RFC-style comments before tokenizing an Authentication-Results
@@ -1707,14 +1707,7 @@ fn without_comments(value: &str) -> std::borrow::Cow<'_, str> {
 /// Parse only the first (topmost) Authentication-Results field. Receiving
 /// MTAs prepend their result, while older fields below it may be supplied by
 /// an untrusted sender or an intermediate relay.
-fn authentication_results(msg: &mail_parser::Message) -> Vec<AuthenticationResult> {
-    let Some(results) = first_raw_header(msg, "Authentication-Results") else {
-        return Vec::new();
-    };
-    // Strip comments before splitting clauses: comments are allowed to contain
-    // semicolons, and splitting first could turn comment text into a fake
-    // method=result clause.
-    let results = without_comments(&results);
+fn authentication_results(results: &str) -> Vec<AuthenticationResult<'_>> {
     results
         .split(';')
         .filter_map(|clause| {
@@ -1729,29 +1722,28 @@ fn authentication_results(msg: &mail_parser::Message) -> Vec<AuthenticationResul
                 .filter_map(|token| token.split_once('='))
                 .map(|(name, value)| {
                     (
-                        name.trim().to_ascii_lowercase(),
+                        name.trim(),
                         value
                             .trim_matches(|ch: char| ch == '"' || ch == '\'')
-                            .trim_end_matches(',')
-                            .to_ascii_lowercase(),
+                            .trim_end_matches(','),
                     )
                 })
                 .collect();
             Some(AuthenticationResult {
-                method: method.to_ascii_lowercase(),
-                result: result.trim_end_matches(',').to_ascii_lowercase(),
+                method,
+                result: result.trim_end_matches(','),
                 properties,
             })
         })
         .collect()
 }
 
-fn auth_property<'a>(result: &'a AuthenticationResult, name: &str) -> Option<&'a str> {
+fn auth_property<'a>(result: &AuthenticationResult<'a>, name: &str) -> Option<&'a str> {
     result
         .properties
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
+        .map(|(_, value)| *value)
 }
 
 /// Classify only strong, receiver-reported authentication. SPF alone never
@@ -1759,14 +1751,15 @@ fn auth_property<'a>(result: &'a AuthenticationResult, name: &str) -> Option<&'a
 /// spoofing nor many forwarding paths. Standard domain authentication needs
 /// both DMARC and a DKIM signature aligned with the visible From domain.
 fn sender_verification(
-    results: &[AuthenticationResult],
+    results: &[AuthenticationResult<'_>],
     from: Option<&Address>,
 ) -> SenderVerification {
-    if let Some(bimi) = results
-        .iter()
-        .find(|result| result.method == "bimi" && result.result == "pass")
-    {
-        return if auth_property(bimi, "policy.authority") == Some("pass") {
+    if let Some(bimi) = results.iter().find(|result| {
+        result.method.eq_ignore_ascii_case("bimi") && result.result.eq_ignore_ascii_case("pass")
+    }) {
+        return if auth_property(bimi, "policy.authority")
+            .is_some_and(|value| value.eq_ignore_ascii_case("pass"))
+        {
             SenderVerification::Brand
         } else {
             SenderVerification::Bimi
@@ -1781,14 +1774,14 @@ fn sender_verification(
     };
 
     let dmarc_pass = results.iter().any(|result| {
-        result.method == "dmarc"
-            && result.result == "pass"
+        result.method.eq_ignore_ascii_case("dmarc")
+            && result.result.eq_ignore_ascii_case("pass")
             && auth_property(result, "header.from")
                 .is_some_and(|domain| domains_aligned(domain, from_domain))
     });
     let aligned_dkim_pass = results.iter().any(|result| {
-        result.method == "dkim"
-            && result.result == "pass"
+        result.method.eq_ignore_ascii_case("dkim")
+            && result.result.eq_ignore_ascii_case("pass")
             && auth_property(result, "header.d")
                 .is_some_and(|domain| domains_aligned(domain, from_domain))
     });
@@ -1796,10 +1789,9 @@ fn sender_verification(
         return SenderVerification::Domain;
     }
 
-    if results
-        .iter()
-        .any(|result| result.method == "compauth" && result.result == "pass")
-    {
+    if results.iter().any(|result| {
+        result.method.eq_ignore_ascii_case("compauth") && result.result.eq_ignore_ascii_case("pass")
+    }) {
         return SenderVerification::Microsoft;
     }
 
@@ -1850,7 +1842,9 @@ fn parse_headers(msg: &mail_parser::Message) -> ParsedHeaders {
 
     let from = msg.from().and_then(|f| f.first()).and_then(addr_from);
     let via = resolve_via(msg, from.as_ref());
-    let authentication_results = authentication_results(msg);
+    let authentication_header = first_raw_header(msg, "Authentication-Results").unwrap_or_default();
+    let authentication_header = without_comments(&authentication_header);
+    let authentication_results = authentication_results(&authentication_header);
     let sender_verification = sender_verification(&authentication_results, from.as_ref());
 
     // multipart/report is the DSN/MDN envelope: bounces and read receipts.
