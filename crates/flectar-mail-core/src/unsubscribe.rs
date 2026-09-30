@@ -86,10 +86,10 @@ fn parse_mailto(uri: &str) -> Option<UnsubscribePlan> {
     let mut body = None;
     for pair in query.unwrap_or("").split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        match k.to_ascii_lowercase().as_str() {
-            "subject" => subject = Some(percent_decode(v)),
-            "body" => body = Some(percent_decode(v)),
-            _ => {}
+        if k.eq_ignore_ascii_case("subject") {
+            subject = Some(percent_decode(v));
+        } else if k.eq_ignore_ascii_case("body") {
+            body = Some(percent_decode(v));
         }
     }
     let subject = subject
