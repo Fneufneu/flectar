@@ -76,8 +76,8 @@ pub(super) fn prepare_message_compose(
         .sender_identities
         .iter()
         .filter(|identity| identity.is_verified())
-        .map(|identity| identity.email.trim().to_ascii_lowercase())
-        .collect::<HashSet<_>>();
+        .map(|identity| identity.email.trim())
+        .collect::<Vec<_>>();
     let sender_email = source
         .to
         .iter()
@@ -94,7 +94,11 @@ pub(super) fn prepare_message_compose(
         })
         .unwrap_or_else(|| source.default_sender_email.clone());
     let candidates = std::iter::once(&source.from)
-        .filter(|address| !own_emails.contains(&address.email.trim().to_ascii_lowercase()))
+        .filter(|address| {
+            !own_emails
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(address.email.trim()))
+        })
         .chain(source.to.iter())
         .chain(source.cc.iter().filter(|_| action == "reply_all"));
     let recipients = deduplicated_addresses(candidates, &own_emails);
@@ -134,14 +138,18 @@ pub(super) fn compose_addresses(addresses: &[flectar_mail_core::models::Address]
 
 fn deduplicated_addresses<'a>(
     addresses: impl IntoIterator<Item = &'a flectar_mail_core::models::Address>,
-    own_emails: &HashSet<String>,
+    own_emails: &[&str],
 ) -> Vec<&'a flectar_mail_core::models::Address> {
     let mut seen = HashSet::new();
     addresses
         .into_iter()
         .filter(|address| {
             let email = address.email.trim().to_ascii_lowercase();
-            !email.is_empty() && !own_emails.contains(&email) && seen.insert(email)
+            !email.is_empty()
+                && !own_emails
+                    .iter()
+                    .any(|own| own.eq_ignore_ascii_case(&email))
+                && seen.insert(email)
         })
         .collect()
 }
