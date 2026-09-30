@@ -1,9 +1,11 @@
 //! Standalone probe for the production bounded image decoder. Run one format
 //! per process so each peak excludes allocations left by previous decodes.
 //! Run with `cargo run -p flectar-renderer-probe --bin benchmark-image-decode
-//! --release -- png|jpeg|webp|gif [target_dimension]`.
+//! --release -- png|jpeg|webp|gif [target_dimension] [width height]
+//! [--expect-rejected]`.
 //! Requested-live heap bytes exclude allocator overhead, DOM, paint cache,
-//! renderer tiles, and process RSS/PSS.
+//! renderer tiles, and process RSS/PSS. `settled_extra` retains the decoded
+//! image; `released_extra` measures after dropping it.
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -74,8 +76,19 @@ fn main() {
         .nth(2)
         .map(|value| value.parse::<u32>().expect("target dimension"))
         .unwrap_or(2048);
-    let width = 3000;
-    let height = 2000;
+    let width = std::env::args()
+        .nth(3)
+        .map(|value| value.parse::<u32>().expect("source width"))
+        .unwrap_or(3000);
+    let height = std::env::args()
+        .nth(4)
+        .map(|value| value.parse::<u32>().expect("source height"))
+        .unwrap_or(2000);
+    let expect_rejected = std::env::args().nth(5).as_deref() == Some("--expect-rejected");
+    assert!(
+        width > 0 && height > 0,
+        "source dimensions must be positive"
+    );
     let source = RgbImage::from_fn(width, height, |x, y| {
         Rgb([(x / 12) as u8, (y / 8) as u8, ((x + y) / 20) as u8])
     });
@@ -96,7 +109,17 @@ fn main() {
     let baseline = LIVE.load(Ordering::Relaxed);
     PEAK.store(baseline, Ordering::Relaxed);
     let started = Instant::now();
-    let decoded = limits.decode(&bytes).expect("decode fixture");
+    let result = limits.decode(&bytes);
+    if expect_rejected {
+        let error = result.expect_err("fixture should exceed decoder limits");
+        assert!(error.contains("document decoder limits"), "{error}");
+        println!(
+            "{format:?} target={target} source={width}x{height} encoded={} rejected={error}",
+            bytes.len(),
+        );
+        return;
+    }
+    let decoded = result.expect("decode fixture");
     let elapsed = started.elapsed();
     let peak = PEAK.load(Ordering::Relaxed) - baseline;
     let settled = LIVE.load(Ordering::Relaxed) - baseline;
@@ -105,15 +128,46 @@ fn main() {
         decoded.data.len(),
         (decoded.pixel_width * decoded.pixel_height * 4) as usize
     );
+    let retained_width = decoded.pixel_width;
+    let retained_height = decoded.pixel_height;
+    drop(decoded);
+    let released = LIVE.load(Ordering::Relaxed).saturating_sub(baseline);
     println!(
-        "{format:?} target={target} source={}x{} retained={}x{} encoded={} peak_extra={} settled_extra={} elapsed_ms={:.2}",
+        "{format:?} target={target} source={}x{} retained={}x{} encoded={} peak_extra={} settled_extra={} released_extra={} elapsed_ms={:.2}",
         width,
         height,
-        decoded.pixel_width,
-        decoded.pixel_height,
+        retained_width,
+        retained_height,
         bytes.len(),
         peak,
         settled,
+        released,
         elapsed.as_secs_f64() * 1000.0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_preserves_rgba_pixels_without_resizing() {
+        let pixels = vec![255, 0, 0, 0, 0, 128, 255, 127];
+        let source = image::RgbaImage::from_raw(2, 1, pixels.clone()).unwrap();
+        let mut encoded = Cursor::new(Vec::new());
+        source.write_to(&mut encoded, ImageFormat::Png).unwrap();
+        let decoded = ImageDecodeLimits {
+            max_source_dimension: 4096,
+            max_source_pixels: 8 * 1024 * 1024,
+            max_jpeg_source_dimension: 16384,
+            max_jpeg_source_pixels: 64 * 1024 * 1024,
+            max_alloc: 8 * 1024 * 1024 * 4,
+            target_dimension: 2048,
+        }
+        .decode(encoded.get_ref())
+        .unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert_eq!((decoded.pixel_width, decoded.pixel_height), (2, 1));
+        assert_eq!(decoded.data.as_ref(), &pixels);
+    }
 }
