@@ -134,7 +134,7 @@ fn unfold(input: &str) -> Vec<Cow<'_, str>> {
             previous.ends_with('=')
                 && previous
                     .split_once(':')
-                    .is_some_and(|(head, _)| head.to_ascii_uppercase().contains("QUOTED-PRINTABLE"))
+                    .is_some_and(|(head, _)| contains_ascii_case(head, "QUOTED-PRINTABLE"))
         });
         if continues_quoted_printable {
             joined.last_mut().unwrap().to_mut().pop();
@@ -146,9 +146,16 @@ fn unfold(input: &str) -> Vec<Cow<'_, str>> {
     joined
 }
 
-fn decoded_value(head: &str, raw: &str) -> String {
-    if !head.to_ascii_uppercase().contains("QUOTED-PRINTABLE") {
-        return raw.to_owned();
+fn contains_ascii_case(value: &str, needle: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn decoded_value<'a>(head: &str, raw: &'a str) -> Cow<'a, str> {
+    if !contains_ascii_case(head, "QUOTED-PRINTABLE") {
+        return Cow::Borrowed(raw);
     }
     let bytes = raw.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -173,10 +180,16 @@ fn decoded_value(head: &str, raw: &str) -> String {
         name.eq_ignore_ascii_case("CHARSET")
             .then(|| value.trim_matches('"'))
     });
-    charset
-        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
-        .map(|encoding| encoding.decode(&decoded).0.into_owned())
-        .unwrap_or_else(|| String::from_utf8_lossy(&decoded).into_owned())
+    if let Some(encoding) =
+        charset.and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+    {
+        Cow::Owned(encoding.decode(&decoded).0.into_owned())
+    } else {
+        Cow::Owned(
+            String::from_utf8(decoded)
+                .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()),
+        )
+    }
 }
 
 fn property_name(line: &str) -> Option<&str> {
