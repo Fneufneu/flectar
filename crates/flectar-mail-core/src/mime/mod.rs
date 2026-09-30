@@ -2119,21 +2119,19 @@ fn build_message_with_attachments<'a>(
             )
         });
 
-    let to_mb: Vec<(&str, &str)> = out
-        .to
-        .iter()
-        .map(|a| (a.name.as_deref().unwrap_or_default(), a.email.as_str()))
-        .collect();
-    let cc_mb: Vec<(&str, &str)> = out
-        .cc
-        .iter()
-        .map(|a| (a.name.as_deref().unwrap_or_default(), a.email.as_str()))
-        .collect();
-    let bcc_mb: Vec<(&str, &str)> = out
-        .bcc
-        .iter()
-        .map(|a| (a.name.as_deref().unwrap_or_default(), a.email.as_str()))
-        .collect();
+    let addresses = |items: &'a [Address]| {
+        mail_builder::headers::address::Address::new_list(
+            items
+                .iter()
+                .map(|address| {
+                    mail_builder::headers::address::Address::from((
+                        address.name.as_deref().unwrap_or_default(),
+                        address.email.as_str(),
+                    ))
+                })
+                .collect(),
+        )
+    };
 
     let mut builder = mail_builder::MessageBuilder::new()
         .message_id(msg_id.trim_matches(['<', '>']))
@@ -2158,14 +2156,14 @@ fn build_message_with_attachments<'a>(
         }
     }
 
-    if !to_mb.is_empty() {
-        builder = builder.to(to_mb);
+    if !out.to.is_empty() {
+        builder = builder.to(addresses(out.to));
     }
-    if !cc_mb.is_empty() {
-        builder = builder.cc(cc_mb);
+    if !out.cc.is_empty() {
+        builder = builder.cc(addresses(out.cc));
     }
-    if !bcc_mb.is_empty() {
-        builder = builder.bcc(bcc_mb);
+    if !out.bcc.is_empty() {
+        builder = builder.bcc(addresses(out.bcc));
     }
     for att in attachments {
         if att
