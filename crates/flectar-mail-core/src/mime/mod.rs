@@ -1943,10 +1943,13 @@ struct InlineImage {
 /// Replace `src="data:image/...;base64,..."` with `src="cid:..."` and return
 /// the decoded images. Editors embed pasted screenshots as data URIs, but
 /// many mail clients (Gmail included) strip those - CID parts survive.
-fn extract_data_uri_images(html: &str) -> (String, Vec<InlineImage>) {
+fn extract_data_uri_images(html: &str) -> (std::borrow::Cow<'_, str>, Vec<InlineImage>) {
     use base64::Engine;
     const MARKER: &str = "src=\"data:image/";
 
+    if !html.contains(MARKER) {
+        return (std::borrow::Cow::Borrowed(html), Vec::new());
+    }
     let mut out = String::with_capacity(html.len());
     let mut images = Vec::new();
     let mut rest = html;
@@ -1984,7 +1987,7 @@ fn extract_data_uri_images(html: &str) -> (String, Vec<InlineImage>) {
         rest = &after[endq + 1..];
     }
     out.push_str(rest);
-    (out, images)
+    (std::borrow::Cow::Owned(out), images)
 }
 
 /// Build a raw RFC 5322 message. Returns (message_id, raw_bytes).
@@ -2513,6 +2516,15 @@ mod tests {
         let part = parsed.attachments().next().unwrap();
         assert_eq!(part.attachment_name(), Some("large.bin"));
         assert_eq!(part.contents(), payload);
+    }
+
+    #[test]
+    fn outgoing_html_without_embedded_images_is_borrowed() {
+        let html = "<p>é界👩‍🚀</p>".repeat(100_000);
+        let (rewritten, images) = extract_data_uri_images(&html);
+        assert!(matches!(rewritten, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(rewritten.as_ptr(), html.as_ptr());
+        assert!(images.is_empty());
     }
 
     #[test]
