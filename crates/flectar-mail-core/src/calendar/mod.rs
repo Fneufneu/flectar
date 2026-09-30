@@ -61,7 +61,7 @@ fn unfold(text: &str) -> Vec<Cow<'_, str>> {
 
 /// "KEY;PARAM=X;PARAM="Y":VALUE" -> (KEY, [(PARAM, X)…], VALUE). The name/
 /// param section ends at the first ':' outside double quotes.
-type ParsedProperty<'a> = (String, Vec<(String, String)>, &'a str);
+type ParsedProperty<'a> = (String, Vec<(String, Cow<'a, str>)>, &'a str);
 
 fn split_prop(line: &str) -> Option<ParsedProperty<'_>> {
     let mut in_quotes = false;
@@ -79,33 +79,56 @@ fn split_prop(line: &str) -> Option<ParsedProperty<'_>> {
     let colon = colon?;
     let (lhs, value) = (&line[..colon], &line[colon + 1..]);
     // Split the name/param section on ';' outside double quotes.
-    let mut parts: Vec<String> = Vec::new();
-    let mut part = String::new();
+    let mut parts: Vec<Cow<'_, str>> = Vec::new();
+    let mut start = 0;
     let mut quoted = false;
-    for ch in lhs.chars() {
+    for (byte, ch) in lhs.char_indices() {
         match ch {
             '"' => quoted = !quoted,
-            ';' if !quoted => parts.push(std::mem::take(&mut part)),
-            _ => part.push(ch),
+            ';' if !quoted => {
+                parts.push(parameter_segment(&lhs[start..byte]));
+                start = byte + 1;
+            }
+            _ => {}
         }
     }
-    parts.push(part);
+    parts.push(parameter_segment(&lhs[start..]));
     let mut parts = parts.into_iter();
     let key = parts.next()?.to_ascii_uppercase();
     let params = parts
-        .filter_map(|p| {
-            let (k, v) = p.split_once('=')?;
-            Some((k.to_ascii_uppercase(), v.trim_matches('"').to_string()))
+        .filter_map(|part| match part {
+            Cow::Borrowed(part) => {
+                let (key, value) = part.split_once('=')?;
+                Some((
+                    key.to_ascii_uppercase(),
+                    Cow::Borrowed(value.trim_matches('"')),
+                ))
+            }
+            Cow::Owned(part) => {
+                let (key, value) = part.split_once('=')?;
+                Some((
+                    key.to_ascii_uppercase(),
+                    Cow::Owned(value.trim_matches('"').to_owned()),
+                ))
+            }
         })
         .collect();
     Some((key, params, value))
 }
 
-fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+fn parameter_segment(segment: &str) -> Cow<'_, str> {
+    if segment.contains('"') {
+        Cow::Owned(segment.replace('"', ""))
+    } else {
+        Cow::Borrowed(segment)
+    }
+}
+
+fn param<'a>(params: &'a [(String, Cow<'_, str>)], key: &str) -> Option<&'a str> {
     params
         .iter()
         .find(|(k, _)| k == key)
-        .map(|(_, v)| v.as_str())
+        .map(|(_, v)| v.as_ref())
 }
 
 /// Parse "20260711", "20260711T130000", "20260711T130000Z" to (ms, all_day).
