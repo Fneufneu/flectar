@@ -2045,27 +2045,27 @@ fn build_message_with_attachments(
             )
         });
 
-    let to_mb: Vec<(String, String)> = out
+    let to_mb: Vec<(&str, &str)> = out
         .to
         .iter()
-        .map(|a| (a.name.clone().unwrap_or_default(), a.email.clone()))
+        .map(|a| (a.name.as_deref().unwrap_or_default(), a.email.as_str()))
         .collect();
-    let cc_mb: Vec<(String, String)> = out
+    let cc_mb: Vec<(&str, &str)> = out
         .cc
         .iter()
-        .map(|a| (a.name.clone().unwrap_or_default(), a.email.clone()))
+        .map(|a| (a.name.as_deref().unwrap_or_default(), a.email.as_str()))
         .collect();
-    let bcc_mb: Vec<(String, String)> = out
+    let bcc_mb: Vec<(&str, &str)> = out
         .bcc
         .iter()
-        .map(|a| (a.name.clone().unwrap_or_default(), a.email.clone()))
+        .map(|a| (a.name.as_deref().unwrap_or_default(), a.email.as_str()))
         .collect();
 
     let mut builder = mail_builder::MessageBuilder::new()
-        .message_id(msg_id.trim_matches(['<', '>']).to_string())
+        .message_id(msg_id.trim_matches(['<', '>']))
         .from((
-            out.from.name.clone().unwrap_or_default(),
-            out.from.email.clone(),
+            out.from.name.as_deref().unwrap_or_default(),
+            out.from.email.as_str(),
         ))
         .subject(out.subject)
         .text_body(out.body_text);
@@ -2108,13 +2108,13 @@ fn build_message_with_attachments(
         builder = builder.attachment(att.mime_type, att.filename, att.bytes);
     }
     if let Some(irt) = out.in_reply_to {
-        builder = builder.in_reply_to(irt.trim_matches(['<', '>']).to_string());
+        builder = builder.in_reply_to(irt.trim_matches(['<', '>']));
     }
     if !out.references.is_empty() {
-        let refs: Vec<String> = out
+        let refs: Vec<&str> = out
             .references
             .iter()
-            .map(|r| r.trim_matches(['<', '>']).to_string())
+            .map(|r| r.trim_matches(['<', '>']))
             .collect();
         builder = builder.references(refs);
     }
@@ -2520,6 +2520,48 @@ mod tests {
         let part = parsed.attachments().next().unwrap();
         assert_eq!(part.attachment_name(), Some("large.bin"));
         assert_eq!(part.contents(), payload);
+    }
+
+    #[test]
+    fn outgoing_borrowed_headers_preserve_unicode_and_references() {
+        let to = [Address {
+            name: Some("é界".into()),
+            email: "to@example.test".into(),
+        }];
+        let cc = [Address {
+            name: None,
+            email: "cc@example.test".into(),
+        }];
+        let bcc = [Address {
+            name: Some("Hidden".into()),
+            email: "bcc@example.test".into(),
+        }];
+        let references = vec!["<first@example.test>".into(), "second@example.test".into()];
+        let mut message = outgoing("body", None);
+        message.to = &to;
+        message.cc = &cc;
+        message.bcc = &bcc;
+        message.in_reply_to = Some("<second@example.test>");
+        message.references = &references;
+        message.message_id = Some("<stable@example.test>");
+        let (id, raw) = build_message_owned(message).unwrap();
+        let parsed = parse_message(&raw).unwrap();
+        assert_eq!(id, "<stable@example.test>");
+        assert_eq!(parsed.headers.to[0].name.as_deref(), Some("é界"));
+        assert_eq!(parsed.headers.cc[0].email, "cc@example.test");
+        assert_eq!(parsed.headers.bcc[0].email, "bcc@example.test");
+        assert!(
+            parsed
+                .headers
+                .references
+                .contains(&"first@example.test".to_owned())
+        );
+        assert!(
+            parsed
+                .headers
+                .references
+                .contains(&"second@example.test".to_owned())
+        );
     }
 
     #[test]
