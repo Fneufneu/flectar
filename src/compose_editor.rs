@@ -451,7 +451,7 @@ impl CosmicComposeEditor {
             .push_str(&document.text()[preedit_offset..]);
         if self.visual_text.ends_with('\n') {
             spans.push((
-                TRAILING_LINE_SENTINEL.to_owned(),
+                TRAILING_LINE_SENTINEL,
                 default_attrs.clone().color(CosmicColor::rgba(0, 0, 0, 0)),
             ));
         }
@@ -460,9 +460,7 @@ impl CosmicComposeEditor {
             buffer.set_metrics_and_size(metrics, Some(physical_width as f32), None);
             buffer.set_wrap(Wrap::WordOrGlyph);
             buffer.set_rich_text(
-                spans
-                    .iter()
-                    .map(|(text, attrs)| (text.as_str(), attrs.clone())),
+                spans.iter().map(|(text, attrs)| (*text, attrs.clone())),
                 &default_attrs,
                 Shaping::Advanced,
                 None,
@@ -693,13 +691,13 @@ impl CosmicComposeEditor {
     }
 }
 
-fn rich_spans(
-    document: &RichComposeDocument,
+fn rich_spans<'a>(
+    document: &'a RichComposeDocument,
     preedit_offset: usize,
-    preedit_text: &str,
+    preedit_text: &'a str,
     default_attrs: &Attrs<'static>,
     link_color: CosmicColor,
-) -> Vec<(String, Attrs<'static>)> {
+) -> Vec<(&'a str, Attrs<'static>)> {
     let runs = document.style_runs();
     let mut spans = Vec::with_capacity(runs.len().saturating_add(2).max(1));
     let mut inserted_preedit = preedit_text.is_empty();
@@ -733,14 +731,14 @@ fn rich_spans(
         push_span(&mut spans, preedit_text, preedit_attrs);
     }
     if spans.is_empty() {
-        spans.push((String::new(), default_attrs.clone()));
+        spans.push(("", default_attrs.clone()));
     }
     spans
 }
 
-fn push_span(spans: &mut Vec<(String, Attrs<'static>)>, text: &str, attrs: Attrs<'static>) {
+fn push_span<'a>(spans: &mut Vec<(&'a str, Attrs<'static>)>, text: &'a str, attrs: Attrs<'static>) {
     if !text.is_empty() {
-        spans.push((text.to_owned(), attrs));
+        spans.push((text, attrs));
     }
 }
 
@@ -1387,6 +1385,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn layout_spans_borrow_long_unicode_text_and_preedit() {
+        let mut document = RichComposeDocument::default();
+        document.synchronize(&"é".repeat(512 * 1024), 2, 2);
+        let preedit = String::from("世界");
+        let attrs = Attrs::new().family(Family::Name(UI_FONT_FAMILY));
+        let spans = rich_spans(&document, 2, &preedit, &attrs, CosmicColor::rgb(0, 90, 180));
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].0, "é");
+        assert_eq!(spans[0].0.as_ptr(), document.text().as_ptr());
+        assert_eq!(spans[1].0, "世界");
+        assert_eq!(spans[1].0.as_ptr(), preedit.as_ptr());
+        assert_eq!(spans[1].1.text_decoration.underline, UnderlineStyle::Single);
+        assert_eq!(spans[2].0.as_ptr(), document.text()[2..].as_ptr());
+        assert_eq!(spans[0].0.len() + spans[2].0.len(), 1024 * 1024);
     }
 
     #[test]
