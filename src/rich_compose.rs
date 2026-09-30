@@ -595,13 +595,8 @@ impl RichComposeDocument {
                 0
             };
             if selected && !all_target {
-                let prefix = match kind {
-                    BlockKind::Bullet => Cow::Borrowed("• "),
-                    BlockKind::Quote => Cow::Borrowed("│ "),
-                    BlockKind::Number => Cow::Owned(format!("{}. ", index - start_line + 1)),
-                };
                 let byte = text.len();
-                text.push_str(&prefix);
+                append_block_marker(&mut text, kind, index - start_line + 1);
                 push_style_run(&mut styles, byte..text.len(), CharacterStyle::default());
             }
             let content_start = source_start + skip;
@@ -1189,21 +1184,39 @@ fn continue_list_edit(old_text: &str, new_text: &str) -> Option<(String, i32)> {
         return Some((text, to_i32(line_start)));
     }
 
-    let prefix = match kind {
-        BlockKind::Bullet => "• ".to_owned(),
-        BlockKind::Quote => "│ ".to_owned(),
-        BlockKind::Number => {
-            let current = line[..prefix_len.saturating_sub(2)]
-                .parse::<usize>()
-                .unwrap_or(1);
-            format!("{}. ", current.saturating_add(1))
-        }
+    let number = if kind == BlockKind::Number {
+        line[..prefix_len.saturating_sub(2)]
+            .parse::<usize>()
+            .unwrap_or(1)
+            .saturating_add(1)
+    } else {
+        1
     };
-    let mut text = String::with_capacity(new_text.len() + prefix.len());
+    let marker_len = block_marker_len(kind, number);
+    let mut text = String::with_capacity(new_text.len() + marker_len);
     text.push_str(&new_text[..insertion + 1]);
-    text.push_str(&prefix);
+    append_block_marker(&mut text, kind, number);
     text.push_str(&new_text[insertion + 1..]);
-    Some((text, to_i32(insertion + 1 + prefix.len())))
+    Some((text, to_i32(insertion + 1 + marker_len)))
+}
+
+fn block_marker_len(kind: BlockKind, number: usize) -> usize {
+    match kind {
+        BlockKind::Bullet => "• ".len(),
+        BlockKind::Quote => "│ ".len(),
+        BlockKind::Number => number.checked_ilog10().unwrap_or(0) as usize + 3,
+    }
+}
+
+fn append_block_marker(text: &mut String, kind: BlockKind, number: usize) {
+    match kind {
+        BlockKind::Bullet => text.push_str("• "),
+        BlockKind::Quote => text.push_str("│ "),
+        BlockKind::Number => {
+            use std::fmt::Write;
+            write!(text, "{number}. ").expect("writing to a String cannot fail");
+        }
+    }
 }
 
 // Prefix lengths are UTF-8 byte offsets into the borrowed line.
