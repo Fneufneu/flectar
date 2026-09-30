@@ -243,17 +243,15 @@ export component ComposerFromRow inherits Rectangle {
                                 overflow: elide;
                             }
 
-                            Text {
+                            Image {
                                 x: parent.width - 25px;
+                                y: (parent.height - self.height) / 2;
                                 width: 16px;
-                                height: parent.height;
+                                height: 16px;
                                 visible: account.id == root.selected-account-id;
-                                text: @tr("✓");
-                                color: root.secondary-color;
-                                font-size: TypeScale.body;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                                source: @image-url("../icons/lucide/outline/check.svg");
+                                colorize: root.secondary-color;
+                                accessible-role: none;
                             }
 
                             account-row-hit := TouchArea {

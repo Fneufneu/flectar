@@ -806,16 +806,15 @@ export component MailReadingPane inherits Rectangle {
                                                             overflow: elide;
                                                             vertical-alignment: center;
                                                         }
-                                                        Text {
+                                                        Image {
                                                             x: parent.width - 58px;
+                                                            y: (parent.height - self.height) / 2;
                                                             width: 22px;
-                                                            height: parent.height;
-                                                            text: label.applied ? "✓" : "";
-                                                            color: root.accent;
-                                                            font-size: TypeScale.body-large;
-                                                            font-weight: 700;
-                                                            horizontal-alignment: center;
-                                                            vertical-alignment: center;
+                                                            height: 22px;
+                                                            visible: label.applied;
+                                                            source: @image-url("../icons/lucide/outline/check.svg");
+                                                            colorize: root.accent;
+                                                            accessible-role: none;
                                                         }
                                                         label-hit := TouchArea {
                                                             accessible-role: checkbox;
