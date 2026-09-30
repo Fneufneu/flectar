@@ -101,15 +101,10 @@ pub async fn pin(core: &Core, space: i64, remote: String, pinned: bool) -> Resul
         .await
 }
 pub(crate) async fn trim(core: &Core, account: i64, budget: i64) -> Result<()> {
-    let obsolete = core.files_db.write(move |c| {
-        let tx=c.transaction()?;
-        let mut size: i64=tx.query_row("SELECT COALESCE(SUM(byte_size),0) FROM content_cache c JOIN spaces s ON s.id=c.space_id WHERE s.account_id=?1",[account],|r|r.get(0))?;
-        let candidates={let mut q=tx.prepare("SELECT c.space_id,c.remote_id,c.relative_path,c.byte_size FROM content_cache c JOIN spaces s ON s.id=c.space_id WHERE s.account_id=?1 AND c.pinned=0 ORDER BY c.accessed_at,c.remote_id")?;q.query_map([account],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?};
-        let mut obsolete=Vec::new();
-        for (space,remote,path,bytes) in candidates {if size<=budget {break;} tx.execute("DELETE FROM content_cache WHERE space_id=?1 AND remote_id=?2",params![space,remote])?;size-=bytes;obsolete.push(path);}
-        if size>budget {return Err(err("Offline files fill the 2 GiB account cache. Release an offline copy before downloading another file."));}
-        tx.commit()?;Ok(obsolete)
-    }).await?;
+    let obsolete = core
+        .files_db
+        .write(move |c| trim_records(c, account, budget))
+        .await?;
     for key in obsolete {
         if safe_key(&key) {
             let _ = tokio::fs::remove_file(core.paths.files_cache_dir(account).join(key)).await;
@@ -117,6 +112,49 @@ pub(crate) async fn trim(core: &Core, account: i64, budget: i64) -> Result<()> {
     }
     sweep(core, account).await
 }
+
+fn trim_records(c: &mut rusqlite::Connection, account: i64, budget: i64) -> Result<Vec<String>> {
+    let tx = c.transaction()?;
+    let mut size: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(byte_size),0) FROM content_cache c JOIN spaces s ON s.id=c.space_id WHERE s.account_id=?1",
+        [account], |r| r.get(0),
+    )?;
+    let mut candidates = Vec::new();
+    if size > budget {
+        let mut query = tx.prepare(
+            "SELECT c.space_id,c.remote_id,c.relative_path,c.byte_size FROM content_cache c JOIN spaces s ON s.id=c.space_id WHERE s.account_id=?1 AND c.pinned=0 ORDER BY c.accessed_at,c.remote_id",
+        )?;
+        let mut rows = query.query([account])?;
+        while size > budget {
+            let Some(row) = rows.next()? else { break };
+            let bytes: i64 = row.get(3)?;
+            candidates.push((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ));
+            size -= bytes;
+        }
+    }
+    if size > budget {
+        return Err(err(
+            "Offline files fill the 2 GiB account cache. Release an offline copy before downloading another file.",
+        ));
+    }
+    // Finish reading before deleting: mutating a table under an active SQLite
+    // cursor can alter traversal. Retain only the prefix actually being evicted.
+    let mut obsolete = Vec::with_capacity(candidates.len());
+    for (space, remote, path) in candidates {
+        tx.execute(
+            "DELETE FROM content_cache WHERE space_id=?1 AND remote_id=?2",
+            params![space, remote],
+        )?;
+        obsolete.push(path);
+    }
+    tx.commit()?;
+    Ok(obsolete)
+}
+
 fn safe_key(key: &str) -> bool {
     key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
