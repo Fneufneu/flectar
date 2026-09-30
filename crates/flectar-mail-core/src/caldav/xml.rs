@@ -303,16 +303,26 @@ pub fn report_calendar_query() -> String {
 }
 
 pub fn report_multiget(hrefs: &[String]) -> String {
-    let hrefs_xml: String = hrefs
-        .iter()
-        .map(|h| format!("<d:href>{}</d:href>", xml_escape(h)))
-        .collect();
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
+    const PREFIX: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-<d:prop><d:getetag/><c:calendar-data/></d:prop>{hrefs_xml}
-</c:calendar-multiget>"#
-    )
+<d:prop><d:getetag/><c:calendar-data/></d:prop>"#;
+    const SUFFIX: &str = r#"
+</c:calendar-multiget>"#;
+    let capacity = PREFIX.len()
+        + SUFFIX.len()
+        + hrefs
+            .iter()
+            .map(|href| "<d:href></d:href>".len() + escaped_len(href))
+            .sum::<usize>();
+    let mut output = String::with_capacity(capacity);
+    output.push_str(PREFIX);
+    for href in hrefs {
+        output.push_str("<d:href>");
+        append_escaped(&mut output, href);
+        output.push_str("</d:href>");
+    }
+    output.push_str(SUFFIX);
+    output
 }
 
 fn escaped_len(value: &str) -> usize {
