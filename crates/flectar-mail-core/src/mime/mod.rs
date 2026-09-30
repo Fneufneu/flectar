@@ -2166,9 +2166,19 @@ pub fn quote_body(original_text: &str, from: &Address, date_ms: i64) -> String {
     let when = chrono::DateTime::from_timestamp_millis(date_ms)
         .map(|d| d.format("%a, %b %-d, %Y at %-I:%M %p").to_string())
         .unwrap_or_default();
-    let who = from.name.clone().unwrap_or_else(|| from.email.clone());
-    let quoted: String = original_text.lines().map(|l| format!("> {l}\n")).collect();
-    format!("\n\nOn {when}, {who} <{}> wrote:\n{quoted}", from.email)
+    let who = from.name.as_deref().unwrap_or(&from.email);
+    let prefix = format!("\n\nOn {when}, {who} <{}> wrote:\n", from.email);
+    let quoted_len = original_text.lines().fold(0usize, |bytes, line| {
+        bytes.saturating_add(line.len()).saturating_add(3)
+    });
+    let mut quoted = String::with_capacity(prefix.len().saturating_add(quoted_len));
+    quoted.push_str(&prefix);
+    for line in original_text.lines() {
+        quoted.push_str("> ");
+        quoted.push_str(line);
+        quoted.push('\n');
+    }
+    quoted
 }
 
 /// Strip Re:/Fwd: prefixes and normalize whitespace/case for subject threading.
@@ -2545,6 +2555,27 @@ mod tests {
         let part = parsed.attachments().next().unwrap();
         assert_eq!(part.attachment_name(), Some("large.bin"));
         assert_eq!(part.contents(), payload);
+    }
+
+    #[test]
+    fn streamed_reply_quote_matches_original_for_unicode_and_line_endings() {
+        for text in ["", "\n", "one", "one\n", "é\r\n界\n\n👩‍🚀", "one\r"] {
+            for name in [None, Some("é界".to_owned())] {
+                let from = Address {
+                    name,
+                    email: "sender@example.test".into(),
+                };
+                let timestamp = 1_700_000_000_000;
+                let when = chrono::DateTime::from_timestamp_millis(timestamp)
+                    .unwrap()
+                    .format("%a, %b %-d, %Y at %-I:%M %p")
+                    .to_string();
+                let who = from.name.as_deref().unwrap_or(&from.email);
+                let body: String = text.lines().map(|line| format!("> {line}\n")).collect();
+                let expected = format!("\n\nOn {when}, {who} <{}> wrote:\n{body}", from.email);
+                assert_eq!(quote_body(text, &from, timestamp), expected);
+            }
+        }
     }
 
     #[test]
