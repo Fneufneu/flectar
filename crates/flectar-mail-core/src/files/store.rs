@@ -166,8 +166,13 @@ pub async fn cached(
     let query = super::attachment_match_query(&query);
     db.read(move |c| {
         let mut q=c.prepare("SELECT node_json FROM nodes WHERE space_id=?1 AND (?3!='' OR parent_id IS ?2) AND (?3='' OR id IN (SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?3)) ORDER BY name,remote_id LIMIT 10000")?;
-        let json=q.query_map(params![space,parent,query],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        json.into_iter().map(|v|Ok(serde_json::from_str(&v)?)).collect()
+        let mut rows = q.query(params![space, parent, query])?;
+        let mut nodes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            nodes.push(serde_json::from_str(&json)?);
+        }
+        Ok(nodes)
     }).await
 }
 pub async fn selected_space(db: &Db, account: i64) -> Result<Option<i64>> {
