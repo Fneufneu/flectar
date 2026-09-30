@@ -478,43 +478,45 @@ impl RichComposeDocument {
             return None;
         }
 
-        let lines = self.lines();
-        let mut html = String::new();
+        let mut html = String::with_capacity(self.text.len());
         let mut open_list: Option<BlockKind> = None;
+        let mut line_start = 0;
 
-        for line in &lines {
-            let prefix = block_prefix(&line.chars);
+        for line in self.text.split('\n') {
+            let prefix = block_prefix_text(line);
             let block = prefix.map(|(kind, _)| kind);
             if !matches!(block, Some(BlockKind::Bullet | BlockKind::Number)) {
                 close_list(&mut html, &mut open_list);
             }
-
-            match prefix {
-                Some((BlockKind::Bullet, prefix_len)) => {
-                    ensure_list(&mut html, &mut open_list, BlockKind::Bullet);
+            let skip = prefix.map_or(0, |(_, bytes)| bytes);
+            let content = line_start + skip..line_start + line.len();
+            match block {
+                Some(kind @ (BlockKind::Bullet | BlockKind::Number)) => {
+                    ensure_list(&mut html, &mut open_list, kind);
                     html.push_str("<li>");
-                    html.push_str(&inline_html(line, prefix_len));
+                    append_inline_html(&mut html, &self.text, &self.styles, content);
                     html.push_str("</li>");
                 }
-                Some((BlockKind::Number, prefix_len)) => {
-                    ensure_list(&mut html, &mut open_list, BlockKind::Number);
-                    html.push_str("<li>");
-                    html.push_str(&inline_html(line, prefix_len));
-                    html.push_str("</li>");
-                }
-                Some((BlockKind::Quote, prefix_len)) => {
+                Some(BlockKind::Quote) => {
                     html.push_str("<blockquote>");
-                    let content = inline_html(line, prefix_len);
-                    html.push_str(if content.is_empty() { "<br>" } else { &content });
+                    if content.is_empty() {
+                        html.push_str("<br>");
+                    } else {
+                        append_inline_html(&mut html, &self.text, &self.styles, content);
+                    }
                     html.push_str("</blockquote>");
                 }
                 None => {
                     html.push_str("<div>");
-                    let content = inline_html(line, 0);
-                    html.push_str(if content.is_empty() { "<br>" } else { &content });
+                    if content.is_empty() {
+                        html.push_str("<br>");
+                    } else {
+                        append_inline_html(&mut html, &self.text, &self.styles, content);
+                    }
                     html.push_str("</div>");
                 }
             }
+            line_start += line.len() + 1;
         }
         close_list(&mut html, &mut open_list);
         Some(html)
@@ -1219,6 +1221,21 @@ fn continue_list_edit(old_text: &str, new_text: &str) -> Option<(String, i32)> {
     Some((text, to_i32(insertion + 1 + prefix.len())))
 }
 
+// Prefix lengths are UTF-8 byte offsets into the borrowed line.
+fn block_prefix_text(text: &str) -> Option<(BlockKind, usize)> {
+    if text.starts_with("• ") {
+        return Some((BlockKind::Bullet, "• ".len()));
+    }
+    if text.starts_with("│ ") {
+        return Some((BlockKind::Quote, "│ ".len()));
+    }
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 && text.as_bytes().get(digits..digits + 2) == Some(b". ") {
+        return Some((BlockKind::Number, digits + 2));
+    }
+    None
+}
+
 fn block_prefix(chars: &[char]) -> Option<(BlockKind, usize)> {
     if chars.starts_with(&['•', ' ']) {
         return Some((BlockKind::Bullet, 2));
@@ -1259,27 +1276,25 @@ fn close_list(html: &mut String, current: &mut Option<BlockKind>) {
     }
 }
 
-fn inline_html(line: &RichLine, skip: usize) -> String {
-    let mut result = String::new();
-    let mut start = skip.min(line.chars.len());
-    while start < line.chars.len() {
-        let style = &line.styles[start];
-        let mut end = start + 1;
-        while end < line.chars.len() && line.styles[end] == *style {
-            end += 1;
-        }
-        let mut escaped = String::new();
-        for &character in &line.chars[start..end] {
-            append_html_char(&mut escaped, character);
-        }
-        append_html_run(&mut result, &escaped, style);
-        start = end;
+fn append_inline_html(
+    output: &mut String,
+    text: &str,
+    styles: &[ComposeStyleRun],
+    range: Range<usize>,
+) {
+    let first = styles.partition_point(|run| run.range.end <= range.start);
+    for run in styles[first..]
+        .iter()
+        .take_while(|run| run.range.start < range.end)
+    {
+        let start = run.range.start.max(range.start);
+        let end = run.range.end.min(range.end);
+        append_html_run(output, &text[start..end], &run.style);
     }
-    result
 }
 
-fn append_html_run(output: &mut String, escaped: &str, style: &CharacterStyle) {
-    if escaped.is_empty() {
+fn append_html_run(output: &mut String, text: &str, style: &CharacterStyle) {
+    if text.is_empty() {
         return;
     }
     if let Some(url) = style.link.as_deref() {
@@ -1303,7 +1318,9 @@ fn append_html_run(output: &mut String, escaped: &str, style: &CharacterStyle) {
             output.push('>');
         }
     }
-    output.push_str(escaped);
+    for character in text.chars() {
+        append_html_char(output, character);
+    }
     for (mark, tag) in tags.into_iter().rev() {
         if style.marks & mark != 0 {
             output.push_str("</");
