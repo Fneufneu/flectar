@@ -1812,23 +1812,30 @@ fn sender_verification(
 /// Split a List-Unsubscribe header into its URIs. RFC 2369 wraps each URI in
 /// angle brackets; tolerate bare comma-separated values from sloppy senders.
 pub fn parse_unsubscribe_uris(raw: &str) -> Vec<String> {
-    let bracketed: Vec<String> = raw
+    unsubscribe_uris(raw).map(str::to_owned).collect()
+}
+
+/// Borrow URI text while choosing a mechanism; only the selected plan needs
+/// owned strings. Any nonempty bracketed URI suppresses the bare fallback.
+pub(crate) fn unsubscribe_uris(raw: &str) -> impl Iterator<Item = &str> + Clone {
+    let mut bracketed = raw
         .match_indices('<')
         .filter_map(|(start, _)| {
             let rest = &raw[start + 1..];
             let end = rest.find('>')?;
             let uri = rest[..end].trim();
-            (!uri.is_empty()).then(|| uri.to_string())
+            (!uri.is_empty()).then_some(uri)
         })
-        .collect();
-    if !bracketed.is_empty() {
-        return bracketed;
-    }
-    raw.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+        .peekable();
+    let has_bracketed = bracketed.peek().is_some();
+    let mut bare = raw.split(',').map(str::trim).filter(|s| !s.is_empty());
+    std::iter::from_fn(move || {
+        if has_bracketed {
+            bracketed.next()
+        } else {
+            bare.next()
+        }
+    })
 }
 
 /// RFC 8058 §3.1: the header value must be exactly "List-Unsubscribe=One-Click"
