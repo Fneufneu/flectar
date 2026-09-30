@@ -574,7 +574,22 @@ impl RichComposeDocument {
             .all(|line| block_prefix_text(line).is_some_and(|(current, _)| current == kind));
         let before = self.take_snapshot();
         self.typing_override = None;
-        let mut text = String::with_capacity(before.text.len());
+        let text_capacity = before
+            .text
+            .split('\n')
+            .enumerate()
+            .skip(start_line)
+            .take(end_line - start_line + 1)
+            .fold(before.text.len(), |size, (index, line)| {
+                let removed = block_prefix_text(line).map_or(0, |(_, bytes)| bytes);
+                let added = if all_target {
+                    0
+                } else {
+                    block_marker_len(kind, index - start_line + 1)
+                };
+                size - removed + added
+            });
+        let mut text = String::with_capacity(text_capacity);
         let mut styles = Vec::with_capacity(before.styles.len());
         let mut source_start = 0;
         let mut start = 0;
