@@ -452,9 +452,9 @@ fn header_with_8bit_cte(
     if !out.is_empty() {
         out.extend_from_slice(b"\r\n");
     }
-    let has_content_type = String::from_utf8_lossy(&out)
-        .to_ascii_lowercase()
-        .contains("content-type:");
+    let has_content_type = out
+        .windows(b"content-type:".len())
+        .any(|window| window.eq_ignore_ascii_case(b"content-type:"));
     if !has_content_type {
         let default_mime = match kind {
             TextSectionKind::Plain => "text/plain",
@@ -472,19 +472,20 @@ fn header_with_8bit_cte(
 }
 
 fn header_declares_qp(mime_header: &[u8]) -> bool {
-    String::from_utf8_lossy(mime_header)
-        .to_ascii_lowercase()
-        .contains("quoted-printable")
+    mime_header
+        .windows(b"quoted-printable".len())
+        .any(|window| window.eq_ignore_ascii_case(b"quoted-printable"))
 }
 
 fn header_declares_base64(mime_header: &[u8]) -> bool {
-    String::from_utf8_lossy(mime_header)
-        .to_ascii_lowercase()
-        .lines()
-        .any(|line| {
-            line.strip_prefix("content-transfer-encoding:")
+    String::from_utf8_lossy(mime_header).lines().any(|line| {
+        const PREFIX: &str = "content-transfer-encoding:";
+        line.get(..PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+            && line
+                .get(PREFIX.len()..)
                 .is_some_and(|value| value.trim().eq_ignore_ascii_case("base64"))
-        })
+    })
 }
 
 fn decode_base64_transfer(input: &[u8]) -> Option<Vec<u8>> {
@@ -2215,6 +2216,23 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_header_detection_preserves_line_and_unicode_boundaries() {
+        assert!(header_declares_base64(
+            "Content-Transfer-Encoding: \u{2003}BaSe64\u{2003}\r\n".as_bytes()
+        ));
+        assert!(!header_declares_base64(
+            b"X-Content-Transfer-Encoding: base64\r\n"
+        ));
+        assert!(!header_declares_base64(
+            "éContent-Transfer-Encoding: base64".as_bytes()
+        ));
+        assert!(header_declares_qp(
+            b"Content-Transfer-Encoding: QUOTED-PRINTABLE\r\n"
+        ));
+        assert!(header_declares_qp(b"\xff quoted-printable"));
+    }
 
     #[test]
     fn base64_transfer_accepts_wrapping_and_missing_padding() {
