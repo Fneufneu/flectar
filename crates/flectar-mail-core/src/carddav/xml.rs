@@ -315,13 +315,23 @@ pub fn addressbook_query() -> String {
     r#"<?xml version="1.0"?><c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/></d:prop><c:filter><c:prop-filter name="FN"/></c:filter></c:addressbook-query>"#.into()
 }
 pub fn multiget(hrefs: &[String]) -> String {
-    let hrefs = hrefs
-        .iter()
-        .map(|h| format!("<d:href>{}</d:href>", escape(h)))
-        .collect::<String>();
-    format!(
-        r#"<?xml version="1.0"?><c:addressbook-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/><c:address-data/></d:prop>{hrefs}</c:addressbook-multiget>"#
-    )
+    const PREFIX: &str = r#"<?xml version="1.0"?><c:addressbook-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/><c:address-data/></d:prop>"#;
+    const SUFFIX: &str = r#"</c:addressbook-multiget>"#;
+    let capacity = PREFIX.len()
+        + SUFFIX.len()
+        + hrefs
+            .iter()
+            .map(|href| "<d:href></d:href>".len() + escaped_len(href))
+            .sum::<usize>();
+    let mut output = String::with_capacity(capacity);
+    output.push_str(PREFIX);
+    for href in hrefs {
+        output.push_str("<d:href>");
+        append_escaped(&mut output, href);
+        output.push_str("</d:href>");
+    }
+    output.push_str(SUFFIX);
+    output
 }
 
 #[cfg(test)]
