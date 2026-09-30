@@ -61,9 +61,9 @@ fn unfold(text: &str) -> Vec<Cow<'_, str>> {
 
 /// "KEY;PARAM=X;PARAM="Y":VALUE" -> (KEY, [(PARAM, X)…], VALUE). The name/
 /// param section ends at the first ':' outside double quotes.
-type ParsedProperty = (String, Vec<(String, String)>, String);
+type ParsedProperty<'a> = (String, Vec<(String, String)>, &'a str);
 
-fn split_prop(line: &str) -> Option<ParsedProperty> {
+fn split_prop(line: &str) -> Option<ParsedProperty<'_>> {
     let mut in_quotes = false;
     let mut colon = None;
     for (i, ch) in line.char_indices() {
@@ -98,7 +98,7 @@ fn split_prop(line: &str) -> Option<ParsedProperty> {
             Some((k.to_ascii_uppercase(), v.trim_matches('"').to_string()))
         })
         .collect();
-    Some((key, params, value.to_string()))
+    Some((key, params, value))
 }
 
 fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
