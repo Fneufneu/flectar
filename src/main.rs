@@ -4142,23 +4142,14 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                     }
                     let current = removal.scope == state.scope && removal.query == state.query;
                     let has_page = removal.page.is_some();
-                    if current && let Some(page) = removal.page.take() {
+                    if current && let Some(mut page) = removal.page.take() {
                         let selected_id = state.selected_id;
-                        let selected = std::mem::take(&mut state.messages)
-                            .into_iter()
-                            .find(|message| Some(message.id) == selected_id);
+                        mail_view_model::carry_selected_detail(
+                            &mut state.messages,
+                            &mut page.messages,
+                            selected_id,
+                        );
                         state.messages = page.messages;
-                        if let Some(selected) = selected
-                            && let Some(message) = state
-                                .messages
-                                .iter_mut()
-                                .find(|message| message.id == selected.id)
-                        {
-                            message.html = selected.html;
-                            message.text = selected.text;
-                            message.attachments = selected.attachments;
-                            message.body_pending = selected.body_pending;
-                        }
                         state.labels = page.labels;
                         state.next_cursor = page.next_cursor;
                     }

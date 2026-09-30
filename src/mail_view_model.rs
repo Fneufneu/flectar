@@ -68,7 +68,7 @@ fn merge_refreshed_mail_head(
     (merged, retained_tail)
 }
 
-fn carry_selected_detail(
+pub(super) fn carry_selected_detail(
     old_messages: &mut [MailMessage],
     refreshed: &mut [MailMessage],
     selected_id: Option<i32>,
@@ -1732,8 +1732,17 @@ mod tests {
         old[0].html = Some("selected HTML".repeat(1_000));
         old[0].text = Some("selected text".repeat(1_000));
         old[0].to = "recipient@example.org".into();
+        old[0].attachments = vec![flectar_mail_core::models::AttachmentMeta {
+            id: 7,
+            filename: Some("selected.txt".into()),
+            mime_type: Some("text/plain".into()),
+            size: Some(42),
+            is_inline: false,
+        }];
         let html_ptr = old[0].html.as_ref().unwrap().as_ptr();
         let text_ptr = old[0].text.as_ref().unwrap().as_ptr();
+        let to_ptr = old[0].to.as_ptr();
+        let attachments_ptr = old[0].attachments.as_ptr();
         let mut fresh = vec![message(1), message(2)];
 
         carry_selected_detail(&mut old, &mut fresh, Some(1));
@@ -1741,9 +1750,31 @@ mod tests {
         assert_eq!(fresh[0].html.as_ref().unwrap().as_ptr(), html_ptr);
         assert_eq!(fresh[0].text.as_ref().unwrap().as_ptr(), text_ptr);
         assert_eq!(fresh[0].to, "recipient@example.org");
+        assert_eq!(fresh[0].to.as_ptr(), to_ptr);
+        assert_eq!(fresh[0].attachments.as_ptr(), attachments_ptr);
+        assert_eq!(fresh[0].attachments[0].id, 7);
         assert!(!fresh[0].body_pending);
         assert!(old[0].html.is_none() && old[0].text.is_none());
         assert!(fresh[1].html.is_none());
+    }
+
+    #[test]
+    fn selected_detail_handoff_skips_pending_or_removed_rows() {
+        let mut old = vec![message(1), message(2)];
+        old[0].html = Some("outdated pending body".into());
+        old[0].body_pending = true;
+        let mut fresh = vec![message(1)];
+
+        carry_selected_detail(&mut old, &mut fresh, Some(1));
+        assert!(fresh[0].html.is_none());
+        assert!(fresh[0].body_pending);
+        assert!(old[0].html.is_some());
+
+        old[1].body_pending = false;
+        old[1].html = Some("removed selected body".into());
+        carry_selected_detail(&mut old, &mut fresh, Some(2));
+        assert!(fresh[0].html.is_none());
+        assert!(old[1].html.is_some());
     }
 
     #[test]
