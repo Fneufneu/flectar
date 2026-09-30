@@ -133,7 +133,10 @@ fn percent_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    match String::from_utf8(out) {
+        Ok(decoded) => decoded,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    }
 }
 
 /// Perform the RFC 8058 one-click POST. Success is a 2xx only: no redirects
