@@ -15,6 +15,9 @@ pub fn plain_text(signature: &Signature) -> String {
     if start > 0 {
         text.drain(..start);
     }
+    // The decoder reserves the HTML input length, which can greatly exceed
+    // the retained text after markup removal and whitespace trimming.
+    text.shrink_to_fit();
     text
 }
 
