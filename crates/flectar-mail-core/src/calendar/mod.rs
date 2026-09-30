@@ -515,7 +515,15 @@ pub fn parse_ics(text: &str) -> Vec<IcsEvent> {
 }
 
 pub(crate) fn escape(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
+    let capacity = v
+        .chars()
+        .map(|character| match character {
+            '\\' | ',' | ';' | '\n' => 2,
+            '\r' => 0,
+            _ => character.len_utf8(),
+        })
+        .sum();
+    let mut out = String::with_capacity(capacity);
     for c in v.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
