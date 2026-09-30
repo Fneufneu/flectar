@@ -1274,19 +1274,42 @@ pub fn referenced_cids(html: &str) -> std::collections::HashSet<String> {
 /// (keyed by [`normalize_cid`]). Unknown cids are left untouched - the browser
 /// still can't fetch them, but nothing else is changed.
 pub fn rewrite_cid_src(html: &str, map: &std::collections::HashMap<String, String>) -> String {
-    CID_SRC
-        .replace_all(html, |caps: &regex::Captures| {
-            let cid = caps
-                .get(1)
-                .or_else(|| caps.get(2))
-                .map(|m| m.as_str())
-                .unwrap_or("");
-            match map.get(&normalize_cid(cid)) {
-                Some(data_uri) => format!("src=\"{data_uri}\""),
-                None => caps.get(0).unwrap().as_str().to_string(),
-            }
-        })
-        .into_owned()
+    let data_for = |caps: &regex::Captures| {
+        let cid = caps.get(1).or_else(|| caps.get(2))?.as_str();
+        map.get(cid.trim().trim_matches(|c| c == '<' || c == '>'))
+    };
+    let mut capacity = html.len();
+    let mut found = false;
+    for caps in CID_SRC.captures_iter(html) {
+        let Some(data_uri) = data_for(&caps) else {
+            continue;
+        };
+        found = true;
+        capacity = capacity
+            .checked_add("src=\"\"".len())
+            .and_then(|size| size.checked_add(data_uri.len()))
+            .and_then(|size| size.checked_sub(caps.get(0).unwrap().len()))
+            .expect("rewritten CID HTML length overflow");
+    }
+    if !found {
+        return html.to_owned();
+    }
+    let mut rewritten = String::with_capacity(capacity);
+    let mut offset = 0;
+    for caps in CID_SRC.captures_iter(html) {
+        let whole = caps.get(0).unwrap();
+        rewritten.push_str(&html[offset..whole.start()]);
+        if let Some(data_uri) = data_for(&caps) {
+            rewritten.push_str("src=\"");
+            rewritten.push_str(data_uri);
+            rewritten.push('"');
+        } else {
+            rewritten.push_str(whole.as_str());
+        }
+        offset = whole.end();
+    }
+    rewritten.push_str(&html[offset..]);
+    rewritten
 }
 
 /// Write cached CID image bytes directly into the final HTML. This avoids a
@@ -2229,6 +2252,21 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cid_rewrite_preserves_unknown_markup_and_reuses_repeated_payload() {
+        let uri = format!("data:image/png;base64,{}", "A".repeat(4096));
+        let map = std::collections::HashMap::from([("logo".to_owned(), uri.clone())]);
+        let html = "é<img SRC='cid: <logo> '><img src=\"cid:logo\"><img src='cid: missing '>";
+        let expected = format!("é<img src=\"{uri}\"><img src=\"{uri}\"><img src='cid: missing '>");
+        let rewritten = rewrite_cid_src(html, &map);
+        assert_eq!(rewritten, expected);
+        assert_eq!(rewritten.capacity(), rewritten.len());
+        assert_eq!(
+            rewrite_cid_src(html, &std::collections::HashMap::new()),
+            html
+        );
+    }
 
     #[test]
     fn thread_references_preserve_reply_order_and_skip_repeated_ancestors() {
