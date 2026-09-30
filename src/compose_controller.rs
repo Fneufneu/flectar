@@ -333,8 +333,17 @@ pub(super) fn apply_rendered_compose_editor(app: &AppWindow, rendered: RenderedC
         })
         .collect::<Vec<_>>();
     let tile_count = tiles.len();
-    app.set_compose_editor_tiles(ModelRc::new(VecModel::from(tiles)));
-    let replaced_model = true;
+    let retained = app.get_compose_editor_tiles();
+    let replaced_model = if let Some(model) = retained
+        .as_any()
+        .downcast_ref::<VecModel<ComposeEditorTile>>()
+    {
+        crate::reconcile_model_rows_by(model, tiles, |tile| tile.y.to_bits(), PartialEq::eq);
+        false
+    } else {
+        app.set_compose_editor_tiles(ModelRc::new(VecModel::from(tiles)));
+        true
+    };
     app.set_compose_editor_content_height(rendered.content_height);
     app.set_compose_editor_caret_x(rendered.caret_x);
     app.set_compose_editor_caret_y(rendered.caret_y);
