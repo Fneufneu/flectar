@@ -52,25 +52,21 @@ fn escape(value: &str) -> String {
     escaped
 }
 
-fn split_escaped(value: &str, delimiter: char) -> Vec<String> {
-    let mut parts = vec![String::new()];
+fn split_escaped(value: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
     let mut escaped = false;
-    for ch in value.chars() {
+    let mut start = 0;
+    for (byte, ch) in value.char_indices() {
         if escaped {
-            parts.last_mut().unwrap().push('\\');
-            parts.last_mut().unwrap().push(ch);
             escaped = false;
         } else if ch == '\\' {
             escaped = true;
         } else if ch == delimiter {
-            parts.push(String::new());
-        } else {
-            parts.last_mut().unwrap().push(ch);
+            parts.push(&value[start..byte]);
+            start = byte + ch.len_utf8();
         }
     }
-    if escaped {
-        parts.last_mut().unwrap().push('\\');
-    }
+    parts.push(&value[start..]);
     parts
 }
 
@@ -364,8 +360,8 @@ pub fn parse(input: &str) -> Result<ContactRecord> {
             "N" if record.name.is_empty() => {
                 let parts = split_escaped(decoded.trim(), ';');
                 record.name = [
-                    parts.get(1).map(String::as_str).unwrap_or(""),
-                    parts.first().map(String::as_str).unwrap_or(""),
+                    parts.get(1).copied().unwrap_or(""),
+                    parts.first().copied().unwrap_or(""),
                 ]
                 .into_iter()
                 .filter(|v| !v.is_empty())
