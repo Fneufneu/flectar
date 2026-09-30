@@ -548,10 +548,14 @@ pub(crate) fn fmt_utc(ms: i64) -> String {
 /// Fold a content line at 74 octets per RFC 5545 §3.1 (continuations get a
 /// leading space). Splits on char boundaries, so multi-byte text stays valid.
 pub(crate) fn fold(line: &str, out: &mut String) {
+    fold_parts([line], out);
+}
+
+fn fold_parts<'a>(parts: impl IntoIterator<Item = &'a str>, out: &mut String) {
     const LIMIT: usize = 74;
     let mut budget = LIMIT;
     let mut used = 0;
-    for c in line.chars() {
+    for c in parts.into_iter().flat_map(str::chars) {
         let w = c.len_utf8();
         if used + w > budget {
             out.push_str("\r\n ");
@@ -565,7 +569,7 @@ pub(crate) fn fold(line: &str, out: &mut String) {
 }
 
 pub(crate) fn push_prop(out: &mut String, key: &str, value: &str) {
-    fold(&format!("{key}:{value}"), out);
+    fold_parts([key, ":", value], out);
 }
 
 /// Details for an outbound invite (METHOD:REQUEST).
