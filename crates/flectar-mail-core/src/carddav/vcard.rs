@@ -200,7 +200,7 @@ fn property_name(line: &str) -> Option<&str> {
     )
 }
 
-fn render(lines: Vec<String>) -> String {
+fn render(lines: Vec<Cow<'_, str>>) -> String {
     if lines.is_empty() {
         return "\r\n".into();
     }
@@ -211,7 +211,7 @@ fn render(lines: Vec<String>) -> String {
     output
 }
 
-fn serialized_lines(record: &ContactRecord, uid: &str, version: &str) -> Vec<String> {
+fn serialized_lines(record: &ContactRecord, uid: &str, version: &str) -> Vec<Cow<'static, str>> {
     let email_property = if version == "3.0" {
         "EMAIL;TYPE=PREF"
     } else {
@@ -219,8 +219,8 @@ fn serialized_lines(record: &ContactRecord, uid: &str, version: &str) -> Vec<Str
     };
     let mut lines = vec![
         "BEGIN:VCARD".into(),
-        format!("VERSION:{version}"),
-        format!("UID:{}", escape(uid)),
+        format!("VERSION:{version}").into(),
+        format!("UID:{}", escape(uid)).into(),
         format!(
             "FN:{}",
             escape(if record.name.is_empty() {
@@ -228,12 +228,13 @@ fn serialized_lines(record: &ContactRecord, uid: &str, version: &str) -> Vec<Str
             } else {
                 &record.name
             })
-        ),
+        )
+        .into(),
         // N is mandatory in vCard 3.0. The app currently models one display
         // name rather than its structured components, so keep N empty and
         // preserve the full value in FN.
         "N:;;;;".into(),
-        format!("{email_property}:{}", escape(&record.email)),
+        format!("{email_property}:{}", escape(&record.email)).into(),
     ];
     for (name, value) in [
         ("TEL", &record.phone),
@@ -245,14 +246,11 @@ fn serialized_lines(record: &ContactRecord, uid: &str, version: &str) -> Vec<Str
         ("CATEGORIES", &record.tags),
     ] {
         if !value.trim().is_empty() {
-            lines.push(format!("{name}:{}", escape(value.trim())));
+            lines.push(format!("{name}:{}", escape(value.trim())).into());
         }
     }
     if !record.postal_address.trim().is_empty() {
-        lines.push(format!(
-            "ADR:;;{};;;;",
-            escape(record.postal_address.trim())
-        ));
+        lines.push(format!("ADR:;;{};;;;", escape(record.postal_address.trim())).into());
     }
     lines.push("END:VCARD".into());
     lines
@@ -509,7 +507,7 @@ pub fn update(existing: &str, record: &ContactRecord, fallback_uid: &str) -> Str
         .iter()
         .position(|line| property_name(line).is_some_and(|name| name.eq_ignore_ascii_case("URL")));
 
-    let mut lines = serialized_lines(record, uid, version);
+    let mut lines: Vec<Cow<'_, str>> = serialized_lines(record, uid, version);
     let end = lines.len() - 1;
     for (index, line) in old.into_iter().enumerate() {
         let Some(name) = property_name(&line) else {
@@ -524,7 +522,7 @@ pub fn update(existing: &str, record: &ContactRecord, fallback_uid: &str) -> Str
             _ => true,
         };
         if preserve {
-            lines.insert(end, line.into_owned());
+            lines.insert(end, line);
         }
     }
     render(lines)
