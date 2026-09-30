@@ -374,7 +374,6 @@ impl CosmicComposeEditor {
             self.editor
                 .set_cursor(if collapse_to_start { start } else { end });
             self.editor.set_selection(Selection::None);
-            self.tiles.clear();
             return Some(self.selection_from_editor());
         } else {
             self.editor.set_selection(Selection::None);
@@ -472,10 +471,10 @@ impl CosmicComposeEditor {
         if self.rendered_selection == Some((selection.start, selection.end)) {
             return;
         }
-        let had_visible_selection = self
+        let previous = self
             .rendered_selection
-            .is_some_and(|(start, end)| start != end);
-        let has_visible_selection = selection.start != selection.end;
+            .and_then(|offsets| self.selection_cursor_bounds(offsets));
+        let current = self.selection_cursor_bounds((selection.start, selection.end));
         let (anchor_offset, cursor_offset) = if self.layout_preedit_text.is_empty() {
             (selection.start, selection.end)
         } else {
@@ -494,9 +493,77 @@ impl CosmicComposeEditor {
             Selection::Normal(anchor)
         });
         self.rendered_selection = Some((selection.start, selection.end));
-        if had_visible_selection || has_visible_selection {
-            self.tiles.clear();
+        if previous.is_some() || current.is_some() {
+            self.invalidate_selection_tiles([previous, current]);
         }
+    }
+
+    fn selection_cursor_bounds(&self, (start, end): (i32, i32)) -> Option<(Cursor, Cursor)> {
+        if start == end || !self.layout_preedit_text.is_empty() {
+            return None;
+        }
+        let start = global_to_cursor(&self.visual_text, start);
+        let end = global_to_cursor(&self.visual_text, end);
+        (start != end).then_some((start.min(end), start.max(end)))
+    }
+
+    fn invalidate_selection_tiles(&mut self, bounds: [Option<(Cursor, Cursor)>; 2]) {
+        let Some(layout) = self.layout_key else {
+            self.tiles.clear();
+            return;
+        };
+        let tile_height = (TILE_HEIGHT_LOGICAL * f32::from_bits(layout.scale_bits)).ceil();
+        let mut extents: [Option<(f32, f32)>; 2] = [None, None];
+        let last_line = bounds
+            .into_iter()
+            .flatten()
+            .map(|(_, end)| end.line)
+            .max()
+            .unwrap_or(0);
+        self.editor.with_buffer(|buffer| {
+            for run in buffer.layout_runs() {
+                if run.line_i > last_line {
+                    break;
+                }
+                for (bound, extent) in bounds.into_iter().zip(extents.iter_mut()) {
+                    let Some((start, end)) = bound else {
+                        continue;
+                    };
+                    if run.line_i < start.line || run.line_i > end.line {
+                        continue;
+                    }
+                    let top = run.line_top;
+                    let bottom = run.line_top + run.line_height;
+                    *extent = Some(match *extent {
+                        Some((first, last)) => (first.min(top), last.max(bottom)),
+                        None => (top, bottom),
+                    });
+                }
+            }
+        });
+        if tile_height <= 0.0
+            || !tile_height.is_finite()
+            || bounds
+                .into_iter()
+                .zip(extents.iter())
+                .any(|(bound, extent)| bound.is_some() && extent.is_none())
+            || extents
+                .iter()
+                .flatten()
+                .any(|(top, bottom)| !top.is_finite() || !bottom.is_finite())
+        {
+            self.tiles.clear();
+            return;
+        }
+        let ranges = extents.map(|extent| {
+            extent.map(|(top, bottom)| {
+                let first = ((top.max(0.0) / tile_height).floor() as u32).saturating_sub(1);
+                let last = ((bottom.max(0.0) / tile_height).floor() as u32).saturating_add(1);
+                first..=last
+            })
+        });
+        self.tiles
+            .retain(|index, _| !ranges.iter().flatten().any(|range| range.contains(index)));
     }
 
     fn selection_from_editor(&self) -> ComposeSelection {
@@ -977,6 +1044,243 @@ mod tests {
         let mut pixel = [0, 0, 0, 0];
         blend_premultiplied(&mut pixel, CosmicColor::rgba(200, 100, 50, 128));
         assert_eq!(pixel, [100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn selection_repaints_nearby_tiles_and_matches_full_render() {
+        let text = (0..160)
+            .map(|line| format!("Line {line} with some draft text\n"))
+            .collect::<String>();
+        let start = text.find("Line 95").unwrap() as i32;
+        let end = start + "Line 95 with".len() as i32;
+        let style = ComposeEditorStyle {
+            text: Color::from_rgb_u8(30, 30, 30),
+            link: Color::from_rgb_u8(0, 90, 180),
+            selection: Color::from_argb_u8(140, 60, 120, 220),
+            selected_text: Color::from_rgb_u8(255, 255, 255),
+        };
+        for scale in [1.0, 1.5, 2.0] {
+            let mut document = RichComposeDocument::default();
+            document.synchronize(&text, 0, 0);
+            let mut surface = CosmicComposeEditor::default();
+            let initial = surface.render(
+                &document,
+                document.selection(),
+                520.0,
+                900.0,
+                1600.0,
+                scale,
+                style,
+                "",
+            );
+            let selection = document.update_selection(start, end);
+            let updated =
+                surface.render(&document, selection, 520.0, 900.0, 1600.0, scale, style, "");
+            let mut fresh = CosmicComposeEditor::default();
+            let expected =
+                fresh.render(&document, selection, 520.0, 900.0, 1600.0, scale, style, "");
+            assert_eq!(initial.tiles.len(), updated.tiles.len());
+            assert_eq!(updated.tiles.len(), expected.tiles.len());
+            let mut preserved = 0;
+            let mut repainted = 0;
+            for ((before, after), full) in initial
+                .tiles
+                .iter()
+                .zip(&updated.tiles)
+                .zip(&expected.tiles)
+            {
+                assert_eq!(after.y, full.y);
+                let before_buffer = before.image.to_rgba8_premultiplied().unwrap();
+                let after_buffer = after.image.to_rgba8_premultiplied().unwrap();
+                let full_buffer = full.image.to_rgba8_premultiplied().unwrap();
+                assert_eq!(
+                    after_buffer.as_bytes(),
+                    full_buffer.as_bytes(),
+                    "scale={scale}, tile_y={}",
+                    after.y
+                );
+                if std::ptr::eq(before_buffer.as_bytes(), after_buffer.as_bytes()) {
+                    preserved += 1;
+                } else {
+                    repainted += 1;
+                }
+            }
+            assert!(
+                preserved > 0,
+                "scale={scale}: unrelated tiles were repainted"
+            );
+            assert!(
+                repainted > 0,
+                "scale={scale}: selection tiles were not repainted"
+            );
+
+            // The navigation handler changes Cosmic Text before the document
+            // selection is published back to the surface.
+            let next = surface
+                .handle_navigation(
+                    &document, selection, 520.0, scale, style, "", "\u{f702}", false, false, false,
+                    false,
+                )
+                .unwrap();
+            let collapsed = document.update_selection(next.start, next.end);
+            let after_collapse =
+                surface.render(&document, collapsed, 520.0, 900.0, 1600.0, scale, style, "");
+            let mut fresh = CosmicComposeEditor::default();
+            let full_collapse =
+                fresh.render(&document, collapsed, 520.0, 900.0, 1600.0, scale, style, "");
+            let mut preserved_after_collapse = 0;
+            for (after, full) in after_collapse.tiles.iter().zip(&full_collapse.tiles) {
+                assert_eq!(after.y, full.y);
+                assert_eq!(
+                    after.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    full.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    "scale={scale}, collapsed tile_y={}",
+                    after.y
+                );
+            }
+            for (before, after) in updated.tiles.iter().zip(&after_collapse.tiles) {
+                let before = before.image.to_rgba8_premultiplied().unwrap();
+                let after = after.image.to_rgba8_premultiplied().unwrap();
+                if std::ptr::eq(before.as_bytes(), after.as_bytes()) {
+                    preserved_after_collapse += 1;
+                }
+            }
+            assert!(
+                preserved_after_collapse > 0,
+                "scale={scale}: collapse cleared all tiles"
+            );
+
+            let far_end = text.find("Line 120").unwrap() as i32 + "Line 120 with".len() as i32;
+            let reverse_multiline = document.update_selection(far_end, start);
+            let after_drag = surface.render(
+                &document,
+                reverse_multiline,
+                520.0,
+                900.0,
+                1600.0,
+                scale,
+                style,
+                "",
+            );
+            let mut fresh = CosmicComposeEditor::default();
+            let full_drag = fresh.render(
+                &document,
+                reverse_multiline,
+                520.0,
+                900.0,
+                1600.0,
+                scale,
+                style,
+                "",
+            );
+            for (after, full) in after_drag.tiles.iter().zip(&full_drag.tiles) {
+                assert_eq!(after.y, full.y);
+                assert_eq!(
+                    after.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    full.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    "scale={scale}, drag tile_y={}",
+                    after.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_selection_tiles_match_full_render() {
+        let text = "wideword ".repeat(450);
+        let style = ComposeEditorStyle {
+            text: Color::from_rgb_u8(30, 30, 30),
+            link: Color::from_rgb_u8(0, 90, 180),
+            selection: Color::from_argb_u8(140, 60, 120, 220),
+            selected_text: Color::from_rgb_u8(255, 255, 255),
+        };
+        for scale in [1.0, 2.0] {
+            let mut document = RichComposeDocument::default();
+            document.synchronize(&text, 0, 0);
+            let mut surface = CosmicComposeEditor::default();
+            surface.render(
+                &document,
+                document.selection(),
+                280.0,
+                600.0,
+                350.0,
+                scale,
+                style,
+                "",
+            );
+            let selection = document.update_selection(1500, 1600);
+            let updated =
+                surface.render(&document, selection, 280.0, 600.0, 350.0, scale, style, "");
+            let mut fresh = CosmicComposeEditor::default();
+            let expected =
+                fresh.render(&document, selection, 280.0, 600.0, 350.0, scale, style, "");
+            assert_eq!(updated.tiles.len(), expected.tiles.len());
+            for (after, full) in updated.tiles.iter().zip(&expected.tiles) {
+                assert_eq!(after.y, full.y);
+                assert_eq!(
+                    after.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    full.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                    "scale={scale}, wrapped tile_y={}",
+                    after.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_direction_selection_and_preedit_tiles_match_full_render() {
+        let text = (0..50)
+            .map(|line| format!("Row {line}: café e\u{301} العربية 👩‍💻 text that wraps\n"))
+            .collect::<String>();
+        let start = text.find("Row 6:").unwrap() as i32;
+        let end = text.find("Row 12:").unwrap() as i32;
+        let style = ComposeEditorStyle {
+            text: Color::from_rgb_u8(30, 30, 30),
+            link: Color::from_rgb_u8(0, 90, 180),
+            selection: Color::from_argb_u8(140, 60, 120, 220),
+            selected_text: Color::from_rgb_u8(255, 255, 255),
+        };
+        for scale in [1.0, 1.5, 2.0] {
+            let mut document = RichComposeDocument::default();
+            document.synchronize(&text, 0, 0);
+            let mut surface = CosmicComposeEditor::default();
+            surface.render(
+                &document,
+                document.selection(),
+                280.0,
+                700.0,
+                128.0,
+                scale,
+                style,
+                "",
+            );
+            for (anchor, cursor, preedit) in [
+                (start, end, ""),
+                (end, start, ""),
+                (start, start, ""),
+                (start, start, "世界"),
+                (start, end, ""),
+                (end, end, ""),
+            ] {
+                let selection = document.update_selection(anchor, cursor);
+                let actual = surface.render(
+                    &document, selection, 280.0, 700.0, 128.0, scale, style, preedit,
+                );
+                let expected = CosmicComposeEditor::default().render(
+                    &document, selection, 280.0, 700.0, 128.0, scale, style, preedit,
+                );
+                assert_eq!(actual.tiles.len(), expected.tiles.len());
+                for (actual, expected) in actual.tiles.iter().zip(&expected.tiles) {
+                    assert_eq!(actual.y, expected.y);
+                    assert_eq!(
+                        actual.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                        expected.image.to_rgba8_premultiplied().unwrap().as_bytes(),
+                        "scale={scale} anchor={anchor} cursor={cursor} preedit={preedit:?} tile_y={}",
+                        actual.y,
+                    );
+                }
+            }
+        }
     }
 
     #[test]
