@@ -9,9 +9,13 @@ use crate::{
 pub const MAX_SIGNATURE_BYTES: usize = 32 * 1024;
 
 pub fn plain_text(signature: &Signature) -> String {
-    mail_parser::decoders::html::html_to_text(&signature.html)
-        .trim()
-        .to_owned()
+    let mut text = mail_parser::decoders::html::html_to_text(&signature.html);
+    text.truncate(text.trim_end().len());
+    let start = text.len() - text.trim_start().len();
+    if start > 0 {
+        text.drain(..start);
+    }
+    text
 }
 
 pub fn text_html(text: &str) -> String {
