@@ -6612,9 +6612,17 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     let updates_for_caldav = ui_task_tx.clone();
     let app_for_caldav = app.as_weak();
     app.on_connect_caldav(move |account_id, url, username, password| {
-        let Some(core) = state_for_caldav.borrow().core.clone() else {
+        let Some(app) = app_for_caldav.upgrade() else {
             return;
         };
+        if app.get_caldav_connecting() {
+            return;
+        }
+        let Some(core) = state_for_caldav.borrow().core.clone() else {
+            app.set_sync_status(UiMessage::plain("Calendar storage is unavailable."));
+            return;
+        };
+        app.set_caldav_connecting(true);
         let updates = updates_for_caldav.clone();
         let app = app_for_caldav.clone();
         runtime_for_caldav.spawn(async move {
@@ -6631,13 +6639,14 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                 Ok(_) => UiMessage::plain("CalDAV connected and initial sync started."),
                 Err(error) => UiMessage::detail("Could not connect CalDAV: {}", error),
             };
-            if connected {
-                let _ = app.upgrade_in_event_loop(|app| {
+            let _ = app.upgrade_in_event_loop(move |app| {
+                app.set_caldav_connecting(false);
+                if connected && app.get_caldav_account_id() == account_id {
                     app.set_caldav_account_id(-1);
                     app.set_caldav_password("".into());
                     app.set_caldav_manage_existing(false);
-                });
-            }
+                }
+            });
             let connections = core.load_calendar_connections().await.ok();
             let _ = updates
                 .send(UiTaskUpdate {

@@ -391,6 +391,7 @@ export component SettingsDialog inherits Rectangle {
     in-out property <string> caldav_username: "";
     in-out property <string> caldav_password: "";
     in-out property <bool> caldav_manage_existing: false;
+    in property <bool> caldav_connecting: false;
     in-out property <int> carddav_account_id: -1;
     in-out property <string> carddav_url: "";
     in-out property <string> carddav_username: "";
@@ -2153,6 +2154,7 @@ export component SettingsDialog inherits Rectangle {
                     }
 
                     VerticalBox {
+                        padding: 0px;
                         padding-top: 22px;
                         padding-right: 22px;
                         padding-bottom: 20px;
@@ -2160,6 +2162,7 @@ export component SettingsDialog inherits Rectangle {
                         spacing: 12px;
 
                         HorizontalBox {
+                            padding: 0px;
                             height: 46px;
                             spacing: 12px;
                             Rectangle {
@@ -2170,6 +2173,7 @@ export component SettingsDialog inherits Rectangle {
                                 Image { x: 11px; y: 11px; width: 22px; height: 22px; source: @image-url("../icons/lucide/outline/calendar.svg"); colorize: root.accent; image-fit: contain; accessible-role: none; }
                             }
                             VerticalBox {
+                                padding: 0px;
                                 spacing: 2px;
                                 Text { text: root.caldav_manage_existing ? @tr("CalDAV settings") : @tr("Set up CalDAV"); color: root.title-color; font-size: TypeScale.heading; font-weight: 700; overflow: elide; }
                                 Text { text: root.caldav_manage_existing ? @tr("Discover new calendars.") : @tr("Works with iCloud, Fastmail, Nextcloud, and standards-compliant CalDAV servers."); color: root.faint-text; font-size: TypeScale.caption; overflow: elide; }
@@ -2178,45 +2182,66 @@ export component SettingsDialog inherits Rectangle {
                             IconButton { width: 40px; height: 40px; icon: @image-url("../icons/lucide/outline/x.svg"); icon-color: root.secondary-text; idle-background: transparent; hover-background: root.accent-soft; tooltip-text: @tr("Close"); clicked => { root.close-caldav-settings(); } }
                         }
 
-                        caldav-url-input := FormField {
-                            height: 57px;
-                            label: @tr("Server address");
-                            value: root.caldav_url;
-                            placeholder: @tr("https://calendar.example.com/");
-                            label-color: root.secondary-text;
-                            edited(value) => { root.caldav_url = value; }
-                        }
-                        FormField {
-                            height: 57px;
-                            label: @tr("Username");
-                            value: root.caldav_username;
-                            placeholder: @tr("Usually your email address");
-                            label-color: root.secondary-text;
-                            edited(value) => { root.caldav_username = value; }
-                        }
-                        FormField {
-                            height: 57px;
-                            label: root.caldav_manage_existing ? @tr("New app password · Optional") : @tr("App password");
-                            value: root.caldav_password;
-                            placeholder: root.caldav_manage_existing ? @tr("Leave blank to keep the current password") : @tr("Stored securely in your system keyring");
-                            input-type: password;
-                            label-color: root.secondary-text;
-                            edited(value) => { root.caldav_password = value; }
-                        }
+                        // Keep the actions reachable when the Android keyboard
+                        // shrinks the window or a connection error wraps.
+                        caldav-scroll := ScrollView {
+                            vertical-stretch: 1;
+                            min-height: 0px;
+                            content-width: self.visible-width;
+                            horizontal-scrollbar-policy: always-off;
+                            mouse-drag-pan-enabled: root.compact;
+                            VerticalBox {
+                                x: 0px;
+                                y: 0px;
+                                padding: 0px;
+                                spacing: 12px;
+                                width: max(0px, caldav-scroll.visible-width - 12px);
+                                height: self.preferred-height;
 
-                        if root.sync_status != "" : Text { text: root.sync_status; color: root.secondary-text; font-size: TypeScale.caption; wrap: word-wrap; height: self.preferred-height; }
-                        Rectangle { vertical-stretch: 1; }
+                                caldav-url-input := FormField {
+                                    enabled: !root.caldav_connecting;
+                                    height: 57px;
+                                    label: @tr("Server address");
+                                    value: root.caldav_url;
+                                    placeholder: @tr("https://calendar.example.com/");
+                                    label-color: root.secondary-text;
+                                    edited(value) => { root.caldav_url = value; }
+                                }
+                                caldav-username-input := FormField {
+                                    enabled: !root.caldav_connecting;
+                                    height: 57px;
+                                    label: @tr("Username");
+                                    value: root.caldav_username;
+                                    placeholder: @tr("Usually your email address");
+                                    label-color: root.secondary-text;
+                                    edited(value) => { root.caldav_username = value; }
+                                }
+                                caldav-password-input := FormField {
+                                    enabled: !root.caldav_connecting;
+                                    height: 57px;
+                                    label: root.caldav_manage_existing ? @tr("New app password · Optional") : @tr("App password");
+                                    value: root.caldav_password;
+                                    placeholder: root.caldav_manage_existing ? @tr("Leave blank to keep the current password") : @tr("Stored securely in your system keyring");
+                                    input-type: password;
+                                    label-color: root.secondary-text;
+                                    edited(value) => { root.caldav_password = value; }
+                                }
+
+                                if root.sync_status != "" : Text { text: root.sync_status; color: root.secondary-text; font-size: TypeScale.caption; wrap: word-wrap; height: self.preferred-height; }
+                            }
+                        }
 
                         HorizontalBox {
+                            padding: 0px;
                             height: root.compact ? 44px : 34px;
                             spacing: 8px;
                             Rectangle { horizontal-stretch: 1; }
                             Button { height: parent.height; text: @tr("Cancel"); clicked => { root.close-caldav-settings(); } }
                             Button {
                                 height: parent.height;
-                                text: root.caldav_manage_existing ? @tr("Reconnect") : @tr("Connect");
+                                text: root.caldav_connecting ? @tr("Connecting…") : root.caldav_manage_existing ? @tr("Reconnect") : @tr("Connect");
                                 primary: true;
-                                enabled: root.caldav_url != "" && (root.caldav_manage_existing || root.caldav_password != "");
+                                enabled: !root.caldav_connecting && root.caldav_url != "" && (root.caldav_manage_existing || root.caldav_password != "");
                                 clicked => { root.connect_caldav(root.caldav_account_id, root.caldav_url, root.caldav_username, root.caldav_password); }
                             }
                         }
