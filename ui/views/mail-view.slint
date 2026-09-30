@@ -154,6 +154,14 @@ export component MailView inherits Rectangle {
     callback select-email-text();
     callback load-remote-images-for-message();
 
+    function dispatch-message-action(action: string) {
+        if root.selection-count > 0 && (action == "trash" || action == "delete_permanently") {
+            root.bulk_message_action(action);
+        } else {
+            root.message_action(action);
+        }
+    }
+
     changed layout-mode => {
         if (root.layout-mode == "minimal") {
             root.compact-page = "list";
@@ -336,7 +344,7 @@ export component MailView inherits Rectangle {
                 surface: root.surface;
                 surface-raised: root.surface-raised;
                 title-color: root.title-color;
-                message_action(action) => { root.message_action(action); }
+                message_action(action) => { root.dispatch-message-action(action); }
                 toggle-mail-label(id, applied) => { root.toggle_mail_label(id, applied); }
                 save-mail-label(id, name, color, global) => { root.save_mail_label(id, -1, name, color, global, -1); }
                 search-mail-labels(query) => { root.search_mail_labels(query); }
@@ -558,7 +566,7 @@ export component MailView inherits Rectangle {
                 surface: root.surface;
                 surface-raised: root.surface-raised;
                 title-color: root.title-color;
-                message_action(action) => { root.message_action(action); }
+                message_action(action) => { root.dispatch-message-action(action); }
                 toggle-mail-label(id, applied) => { root.toggle_mail_label(id, applied); }
                 save-mail-label(id, name, color, global) => { root.save_mail_label(id, -1, name, color, global, -1); }
                 search-mail-labels(query) => { root.search_mail_labels(query); }
