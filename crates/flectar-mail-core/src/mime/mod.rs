@@ -1189,9 +1189,12 @@ fn html_tag_end(html: &str, start: usize) -> Option<usize> {
 /// neutral element, then transplanting the serialized safe attributes onto
 /// html/body. Event handlers and other unknown attributes never pass through.
 fn sanitize_container_attributes(attributes: &str) -> String {
+    if attributes.trim().is_empty() {
+        return String::new();
+    }
     let probe = format!("<div{attributes}></div>");
     let cleaned = SANITIZER.clean(&probe).to_string();
-    let Some(start) = cleaned.to_ascii_lowercase().find("<div") else {
+    let Some(start) = find_html_tag(&cleaned, "div", 0, false) else {
         return String::new();
     };
     let Some(end) = html_tag_end(&cleaned, start) else {
