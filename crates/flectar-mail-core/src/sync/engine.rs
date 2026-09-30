@@ -42,6 +42,25 @@ const BODY_FETCH_CHUNK: usize = 200;
 /// Each round queues at most this many missing IDs across the account,
 /// regardless of mailbox size. Older rows are reached through keyset pages.
 const BODY_PLAN_PAGE: i64 = 2 * BODY_FETCH_CHUNK as i64;
+/// At most two account rounds may retain a 400-ID planning page and its
+/// workers at once. Release after each round so waiting accounts can advance.
+/// This is acquired before the shared body-byte permit; foreground reads use
+/// neither permit.
+const BACKGROUND_BODY_PLAN_PAGES: usize = 2;
+static BACKGROUND_BODY_PLAN_BUDGET: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+async fn reserve_background_plan_page() -> tokio::sync::OwnedSemaphorePermit {
+    BACKGROUND_BODY_PLAN_BUDGET
+        .get_or_init(|| {
+            std::sync::Arc::new(tokio::sync::Semaphore::new(BACKGROUND_BODY_PLAN_PAGES))
+        })
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("body planning budget is never closed")
+}
+
 /// Bound one selective response independently of message count. Two workers at
 /// this ceiling use modest memory while still allowing high-throughput bursts.
 const MAX_SELECTIVE_BATCH_BYTES: u64 = 8 * 1024 * 1024;
@@ -2600,6 +2619,50 @@ mod content_batch_tests {
     use super::*;
 
     #[tokio::test]
+    async fn background_planning_pages_are_shared_and_waiters_cancel_cleanly() {
+        let first = reserve_background_plan_page().await;
+        let second = reserve_background_plan_page().await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                reserve_background_plan_page()
+            )
+            .await
+            .is_err()
+        );
+        // The worker must keep the slot after the parent releases its handle,
+        // and dropping the round must abort the worker rather than detach it.
+        let first = Arc::new(first);
+        let worker_slot = Arc::clone(&first);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(async move {
+            let _slot = worker_slot;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        drop(first);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                reserve_background_plan_page()
+            )
+            .await
+            .is_err()
+        );
+        drop(workers);
+        let third = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reserve_background_plan_page(),
+        )
+        .await
+        .unwrap();
+        drop(second);
+        drop(third);
+    }
+
+    #[tokio::test]
     async fn background_budget_is_shared_and_oversized_batches_run_alone() {
         let permit = reserve_background_body_bytes(u64::MAX).await;
         assert!(
@@ -2773,6 +2836,10 @@ async fn drain_missing_bodies(
     let mut pass_had_chunks = false;
 
     loop {
+        // Hold one shared page slot through worker completion. This bounds
+        // queued IDs across accounts and always takes the planning permit
+        // before any worker can take the body-byte permit.
+        let plan_page = Arc::new(reserve_background_plan_page().await);
         let mail_history = settings_rx.borrow_and_update().mail_history;
         let cutoff_ms = mail_history.cutoff_ms_at(now_ms());
         let folders = ctx
@@ -2872,19 +2939,31 @@ async fn drain_missing_bodies(
         let workers = cap.min(chunks.len());
         let queue = Arc::new(tokio::sync::Mutex::new(chunks));
         let persisted = Arc::new(AtomicU64::new(0));
-        let mut handles = Vec::with_capacity(workers);
+        // Dropping this set on account removal aborts its workers instead of
+        // detaching them from the round's planning guard.
+        let mut handles = tokio::task::JoinSet::new();
         for _ in 0..workers {
-            handles.push(tokio::spawn(body_worker(
-                ctx.clone(),
-                config.clone(),
-                queue.clone(),
-                persisted.clone(),
-                settings_rx.clone(),
-            )));
+            let plan_page = Arc::clone(&plan_page);
+            let worker_ctx = ctx.clone();
+            let worker_config = config.clone();
+            let worker_queue = queue.clone();
+            let worker_persisted = persisted.clone();
+            let worker_settings = settings_rx.clone();
+            handles.spawn(async move {
+                let _plan_page = plan_page;
+                body_worker(
+                    worker_ctx,
+                    worker_config,
+                    worker_queue,
+                    worker_persisted,
+                    worker_settings,
+                )
+                .await
+            });
         }
         let mut worker_error = None;
-        for handle in handles {
-            match handle.await {
+        while let Some(result) = handles.join_next().await {
+            match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     if worker_error.is_none() {
