@@ -176,13 +176,20 @@ pub struct ConnectionSettings {
 }
 
 fn attachment_match_query(query: &str) -> String {
-    query
+    let mut output = String::new();
+    for word in query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .take(32)
-        .map(|s| format!("\"{s}\"*"))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+    {
+        if !output.is_empty() {
+            output.push_str(" AND ");
+        }
+        output.push('"');
+        output.push_str(word);
+        output.push_str("\"*");
+    }
+    output
 }
 
 fn attachment_page(
