@@ -168,8 +168,7 @@ pub fn parse(body: &str) -> Result<Multistatus> {
             Event::End(e) => {
                 let name = local(e.name().as_ref());
                 path.pop();
-                let value = text.trim().to_owned();
-                text.clear();
+                let value = text.trim();
                 match name.as_str() {
                     "response" => {
                         if let Some(mut item) = current.take() {
@@ -205,9 +204,11 @@ pub fn parse(body: &str) -> Result<Multistatus> {
                         let in_propstat = props.is_some();
                         if let Some(item) = props.as_mut().or(current.as_mut()) {
                             match href_target {
-                                Some("principal") => item.principal = Some(value),
-                                Some("home") => item.home_set = Some(value),
-                                _ if !in_propstat && item.href.is_empty() => item.href = value,
+                                Some("principal") => item.principal = Some(value.to_owned()),
+                                Some("home") => item.home_set = Some(value.to_owned()),
+                                _ if !in_propstat && item.href.is_empty() => {
+                                    item.href = value.to_owned()
+                                }
                                 _ => {}
                             }
                         }
@@ -223,35 +224,36 @@ pub fn parse(body: &str) -> Result<Multistatus> {
                     }
                     "getetag" => {
                         if let Some(item) = props.as_mut().or(current.as_mut()) {
-                            item.etag = Some(value);
+                            item.etag = Some(value.to_owned());
                         }
                     }
                     "address-data" => {
                         if let Some(item) = props.as_mut().or(current.as_mut()) {
-                            item.address_data = Some(value);
+                            item.address_data = Some(value.to_owned());
                         }
                     }
                     "displayname" => {
                         if !value.is_empty()
                             && let Some(item) = props.as_mut().or(current.as_mut())
                         {
-                            item.display_name = Some(value);
+                            item.display_name = Some(value.to_owned());
                         }
                     }
                     "getctag" => {
                         if let Some(item) = props.as_mut().or(current.as_mut()) {
-                            item.ctag = Some(value);
+                            item.ctag = Some(value.to_owned());
                         }
                     }
                     "sync-token" => {
                         if let Some(item) = props.as_mut().or(current.as_mut()) {
-                            item.sync_token = Some(value);
+                            item.sync_token = Some(value.to_owned());
                         } else {
-                            out.sync_token = Some(value);
+                            out.sync_token = Some(value.to_owned());
                         }
                     }
                     _ => {}
                 }
+                text.clear();
             }
             Event::Eof => break,
             _ => {}
