@@ -1675,7 +1675,10 @@ struct AuthenticationResult {
 /// Remove RFC-style comments before tokenizing an Authentication-Results
 /// clause. This prevents text such as `(upstream said bimi=pass)` from being
 /// mistaken for a receiver-authenticated result.
-fn without_comments(value: &str) -> String {
+fn without_comments(value: &str) -> std::borrow::Cow<'_, str> {
+    if !value.contains(['(', '\\']) {
+        return std::borrow::Cow::Borrowed(value);
+    }
     let mut output = String::with_capacity(value.len());
     let mut depth = 0u32;
     let mut escaped = false;
@@ -1698,7 +1701,7 @@ fn without_comments(value: &str) -> String {
             _ => {}
         }
     }
-    output
+    std::borrow::Cow::Owned(output)
 }
 
 /// Parse only the first (topmost) Authentication-Results field. Receiving
