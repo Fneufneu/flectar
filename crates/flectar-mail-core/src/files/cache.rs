@@ -25,10 +25,7 @@ pub async fn content(
         .filter(|id| !id.starts_with("http://") && !id.starts_with("https://"))
         .or(node.etag.as_deref())
         .unwrap_or("");
-    let key = format!(
-        "{:x}",
-        Sha256::digest(format!("{space}\0{}\0{validator}", node.id).as_bytes())
-    );
+    let key = content_key(&[&space.to_string(), &node.id, validator]);
     let directory = core.paths.files_cache_dir(account);
     let path = directory.join(&key);
     let lookup = node.id.clone();
@@ -78,6 +75,20 @@ pub async fn content(
 // Two GiB per account, including explicitly pinned files. Pins survive ordinary
 // eviction, but server deletion/revocation and account removal take precedence.
 const CACHE_BUDGET: i64 = 2 * 1024 * 1024 * 1024;
+
+/// Hash identifiers without joining potentially large remote values. Keep the
+/// NUL separators so existing disk cache names remain valid.
+pub(super) fn content_key(parts: &[&str]) -> String {
+    let mut hash = Sha256::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            hash.update(b"\0");
+        }
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
 pub async fn pin(core: &Core, space: i64, remote: String, pinned: bool) -> Result<()> {
     core.files_db
         .write(move |c| {
