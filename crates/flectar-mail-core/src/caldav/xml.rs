@@ -152,8 +152,7 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
             Event::End(e) => {
                 let name = local_name(e.name().as_ref());
                 path.pop();
-                let value = text.trim().to_string();
-                text.clear();
+                let value = text.trim();
                 match name.as_str() {
                     "response" => {
                         if let Some(mut item) = cur.take() {
@@ -176,12 +175,12 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
                         if let Some(item) = cur.as_mut() {
                             match href_target {
                                 Some("principal") => {
-                                    item.current_user_principal = Some(value);
+                                    item.current_user_principal = Some(value.to_owned());
                                 }
-                                Some("home") => item.calendar_home_set = Some(value),
+                                Some("home") => item.calendar_home_set = Some(value.to_owned()),
                                 _ => {
                                     if item.href.is_empty() {
-                                        item.href = value;
+                                        item.href = value.to_owned();
                                     }
                                 }
                             }
@@ -203,42 +202,43 @@ pub fn parse_multistatus(body: &str) -> Result<Multistatus> {
                     }
                     "getetag" => {
                         if let Some(item) = cur.as_mut() {
-                            item.etag = Some(value);
+                            item.etag = Some(value.to_owned());
                         }
                     }
                     "calendar-data" => {
                         if let Some(item) = cur.as_mut() {
-                            item.calendar_data = Some(value);
+                            item.calendar_data = Some(value.to_owned());
                         }
                     }
                     "displayname" => {
                         if let Some(item) = cur.as_mut()
                             && !value.is_empty()
                         {
-                            item.displayname = Some(value);
+                            item.displayname = Some(value.to_owned());
                         }
                     }
                     "calendar-color" => {
                         if let Some(item) = cur.as_mut()
                             && !value.is_empty()
                         {
-                            item.color = Some(value);
+                            item.color = Some(value.to_owned());
                         }
                     }
                     "getctag" => {
                         if let Some(item) = cur.as_mut() {
-                            item.ctag = Some(value);
+                            item.ctag = Some(value.to_owned());
                         }
                     }
                     "sync-token" => {
                         if let Some(item) = cur.as_mut() {
-                            item.sync_token = Some(value.clone());
+                            item.sync_token = Some(value.to_owned());
                         } else {
-                            out.sync_token = Some(value);
+                            out.sync_token = Some(value.to_owned());
                         }
                     }
                     _ => {}
                 }
+                text.clear();
             }
             Event::Eof => break,
             _ => {}
