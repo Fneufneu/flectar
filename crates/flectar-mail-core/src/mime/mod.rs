@@ -518,14 +518,25 @@ fn decoded_looks_like_html(decoded: &[u8]) -> bool {
         .position(|byte| !byte.is_ascii_whitespace())
         .unwrap_or(decoded.len());
     let probe = &decoded[start..decoded.len().min(start.saturating_add(1024))];
-    let probe = String::from_utf8_lossy(probe).to_ascii_lowercase();
-    probe.starts_with("<!doctype html")
-        || probe.starts_with("<html")
-        || probe.starts_with("<head")
-        || probe.starts_with("<body")
-        || probe.starts_with("<meta")
-        || probe.starts_with("<style")
-        || (probe.starts_with("<?xml") && probe.contains("<html"))
+    let starts_with = |prefix: &[u8]| {
+        probe
+            .get(..prefix.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+    };
+    [
+        b"<!doctype html".as_slice(),
+        b"<html",
+        b"<head",
+        b"<body",
+        b"<meta",
+        b"<style",
+    ]
+    .into_iter()
+    .any(starts_with)
+        || (starts_with(b"<?xml")
+            && probe
+                .windows(b"<html".len())
+                .any(|value| value.eq_ignore_ascii_case(b"<html")))
 }
 
 fn decoded_looks_like_calendar(decoded: &[u8]) -> bool {
@@ -2216,6 +2227,20 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_signature_recognizes_bom_case_and_xml_without_decoding() {
+        assert!(decoded_looks_like_html(
+            b"\xef\xbb\xbf \r\n<HTML><body>mail"
+        ));
+        assert!(decoded_looks_like_html(b"<?XML version='1.0'?><HTML>\xff"));
+        assert!(!decoded_looks_like_html(b"\xff<HTML>"));
+        assert!(!decoded_looks_like_html(b"plain <html> text"));
+        let mut xml = b"<?xml".to_vec();
+        xml.resize(1024, b' ');
+        xml.extend_from_slice(b"<html>");
+        assert!(!decoded_looks_like_html(&xml));
+    }
 
     #[test]
     fn transfer_header_detection_preserves_line_and_unicode_boundaries() {
