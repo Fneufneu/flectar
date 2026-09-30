@@ -1,5 +1,7 @@
 //! Small, defensive vCard 3.0/4.0 projection for the fields the contact UI owns.
 
+use std::borrow::Cow;
+
 use crate::error::Result;
 use crate::models::ContactRecord;
 
@@ -98,17 +100,35 @@ fn append_folded_line(output: &mut String, line: &str) {
     output.push_str("\r\n");
 }
 
-fn unfold(input: &str) -> Vec<String> {
-    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
-    let mut lines: Vec<String> = Vec::new();
-    for line in normalized.split('\n') {
-        if (line.starts_with(' ') || line.starts_with('\t')) && !lines.is_empty() {
-            lines.last_mut().unwrap().push_str(&line[1..]);
+fn physical_lines(input: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(input);
+    std::iter::from_fn(move || {
+        let current = rest.take()?;
+        if let Some(end) = current.find(['\r', '\n']) {
+            let newline = current.as_bytes()[end];
+            let tail = &current[end + 1..];
+            rest = Some(if newline == b'\r' {
+                tail.strip_prefix('\n').unwrap_or(tail)
+            } else {
+                tail
+            });
+            Some(&current[..end])
         } else {
-            lines.push(line.to_owned());
+            Some(current)
+        }
+    })
+}
+
+fn unfold(input: &str) -> Vec<Cow<'_, str>> {
+    let mut lines: Vec<Cow<'_, str>> = Vec::new();
+    for line in physical_lines(input) {
+        if (line.starts_with(' ') || line.starts_with('\t')) && !lines.is_empty() {
+            lines.last_mut().unwrap().to_mut().push_str(&line[1..]);
+        } else {
+            lines.push(Cow::Borrowed(line));
         }
     }
-    let mut joined = Vec::<String>::new();
+    let mut joined = Vec::<Cow<'_, str>>::new();
     for line in lines {
         let continues_quoted_printable = joined.last().is_some_and(|previous| {
             previous.ends_with('=')
@@ -117,8 +137,8 @@ fn unfold(input: &str) -> Vec<String> {
                     .is_some_and(|(head, _)| head.to_ascii_uppercase().contains("QUOTED-PRINTABLE"))
         });
         if continues_quoted_printable {
-            joined.last_mut().unwrap().pop();
-            joined.last_mut().unwrap().push_str(&line);
+            joined.last_mut().unwrap().to_mut().pop();
+            joined.last_mut().unwrap().to_mut().push_str(&line);
         } else {
             joined.push(line);
         }
@@ -462,7 +482,7 @@ pub fn update(existing: &str, record: &ContactRecord, fallback_uid: &str) -> Str
             _ => true,
         };
         if preserve {
-            lines.insert(end, line);
+            lines.insert(end, line.into_owned());
         }
     }
     render(lines)
