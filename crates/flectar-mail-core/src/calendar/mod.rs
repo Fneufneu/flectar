@@ -673,9 +673,9 @@ pub fn build_request_ics(spec: &InviteSpec) -> String {
             push_prop(out, "LOCATION", &escape(loc));
         }
         let desc = match (spec.description, spec.join_url) {
-            (Some(d), Some(u)) => Some(format!("{d}\n\n{u}")),
-            (Some(d), None) => Some(d.to_string()),
-            (None, Some(u)) => Some(u.to_string()),
+            (Some(d), Some(u)) => Some(Cow::Owned(format!("{d}\n\n{u}"))),
+            (Some(d), None) => Some(Cow::Borrowed(d)),
+            (None, Some(u)) => Some(Cow::Borrowed(u)),
             (None, None) => None,
         };
         if let Some(d) = &desc {
