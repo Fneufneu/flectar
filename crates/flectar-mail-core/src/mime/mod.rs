@@ -1885,7 +1885,7 @@ pub fn parse_message(raw: &[u8]) -> Result<ParsedBody> {
 
     let headers = parse_headers(&msg);
 
-    let text = msg.body_text(0).map(|t| t.to_string());
+    let text = msg.body_text(0).map(|t| t.into_owned());
     let html = msg.body_html(0).map(|h| sanitize_html(&h));
 
     let snippet = make_body_snippet(text.as_deref(), html.as_deref());
@@ -2252,6 +2252,16 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parsed_body_retains_decoded_unicode_and_generated_html_text() {
+        let raw = b"From: alice@example.com\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nH=C3=A9llo";
+        assert_eq!(parse_message(raw).unwrap().text.as_deref(), Some("Héllo"));
+        let raw = b"From: alice@example.com\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hello <b>mail</b></p>";
+        let parsed = parse_message(raw).unwrap();
+        assert!(parsed.text.unwrap().contains("Hello mail"));
+        assert!(parsed.html.unwrap().contains("<b>mail</b>"));
+    }
 
     #[test]
     fn cid_rewrite_preserves_unknown_markup_and_reuses_repeated_payload() {
