@@ -1268,11 +1268,10 @@ fn inline_html(line: &RichLine, skip: usize) -> String {
         while end < line.chars.len() && line.styles[end] == *style {
             end += 1;
         }
-        let escaped = line.chars[start..end]
-            .iter()
-            .copied()
-            .map(escape_html_char)
-            .collect::<String>();
+        let mut escaped = String::new();
+        for &character in &line.chars[start..end] {
+            append_html_char(&mut escaped, character);
+        }
         result.push_str(&html_run(&escaped, style));
         start = end;
     }
@@ -1305,19 +1304,23 @@ fn html_run(escaped: &str, style: &CharacterStyle) -> String {
     value
 }
 
-fn escape_html_char(character: char) -> String {
+fn append_html_char(output: &mut String, character: char) {
     match character {
-        '&' => "&amp;".to_owned(),
-        '<' => "&lt;".to_owned(),
-        '>' => "&gt;".to_owned(),
-        '"' => "&quot;".to_owned(),
-        '\'' => "&#39;".to_owned(),
-        _ => character.to_string(),
+        '&' => output.push_str("&amp;"),
+        '<' => output.push_str("&lt;"),
+        '>' => output.push_str("&gt;"),
+        '"' => output.push_str("&quot;"),
+        '\'' => output.push_str("&#39;"),
+        _ => output.push(character),
     }
 }
 
 fn escape_html_attribute(value: &str) -> String {
-    value.chars().map(escape_html_char).collect()
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        append_html_char(&mut output, character);
+    }
+    output
 }
 
 fn ordered(a: usize, b: usize) -> (usize, usize) {
@@ -1405,6 +1408,21 @@ mod tests {
             assert_eq!(actual.style.link.as_deref(), expected.2);
         }
         assert_style_coverage(document);
+    }
+
+    #[test]
+    fn html_export_preserves_all_marks_and_escaped_unicode() {
+        let text = "<&\"'é👩‍🚀>";
+        let mut document = RichComposeDocument::default();
+        document.synchronize(text, 0, text.len() as i32);
+        for mark in ["bold", "italic", "underline", "strike", "code"] {
+            document.format(mark, text, 0, text.len() as i32);
+        }
+        document.set_link("https://example.org/?a=\"&b='", text, 0, text.len() as i32);
+        assert_eq!(
+            document.body_html().unwrap(),
+            "<div><a href=\"https://example.org/?a=&quot;&amp;b=&#39;\"><strong><em><s><u><code>&lt;&amp;&quot;&#39;é👩‍🚀&gt;</code></u></s></em></strong></a></div>"
+        );
     }
 
     #[test]
