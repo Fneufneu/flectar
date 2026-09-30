@@ -2055,14 +2055,20 @@ fn extract_data_uri_images(html: &str) -> (std::borrow::Cow<'_, str>, Vec<Inline
     }
 }
 
+struct MessageAttachment<'a> {
+    filename: std::borrow::Cow<'a, str>,
+    mime_type: std::borrow::Cow<'a, str>,
+    bytes: std::borrow::Cow<'a, [u8]>,
+}
+
 /// Build a raw RFC 5322 message. Returns (message_id, raw_bytes).
 pub fn build_message(out: &OutgoingMessage) -> Result<(String, Vec<u8>)> {
     build_message_with_attachments(
         out,
-        out.attachments.iter().map(|att| OutgoingAttachment {
-            filename: att.filename.clone(),
-            mime_type: att.mime_type.clone(),
-            bytes: att.bytes.clone(),
+        out.attachments.iter().map(|att| MessageAttachment {
+            filename: std::borrow::Cow::Borrowed(att.filename.as_str()),
+            mime_type: std::borrow::Cow::Borrowed(att.mime_type.as_str()),
+            bytes: std::borrow::Cow::Borrowed(att.bytes.as_slice()),
         }),
     )
 }
@@ -2071,12 +2077,19 @@ pub fn build_message(out: &OutgoingMessage) -> Result<(String, Vec<u8>)> {
 /// Send paths should use this when the attachments will not be needed again.
 pub fn build_message_owned(mut out: OutgoingMessage<'_>) -> Result<(String, Vec<u8>)> {
     let attachments = std::mem::take(&mut out.attachments);
-    build_message_with_attachments(&out, attachments)
+    build_message_with_attachments(
+        &out,
+        attachments.into_iter().map(|att| MessageAttachment {
+            filename: std::borrow::Cow::Owned(att.filename),
+            mime_type: std::borrow::Cow::Owned(att.mime_type),
+            bytes: std::borrow::Cow::Owned(att.bytes),
+        }),
+    )
 }
 
-fn build_message_with_attachments(
-    out: &OutgoingMessage<'_>,
-    attachments: impl IntoIterator<Item = OutgoingAttachment>,
+fn build_message_with_attachments<'a>(
+    out: &'a OutgoingMessage<'_>,
+    attachments: impl IntoIterator<Item = MessageAttachment<'a>>,
 ) -> Result<(String, Vec<u8>)> {
     // A large binary part expands predictably under MIME base64. Reserve near
     // the final size so Vec growth does not leave substantial unused capacity
@@ -2166,7 +2179,11 @@ fn build_message_with_attachments(
                 binary_output_bytes.saturating_add(encoded_binary_len(att.bytes.len()));
         }
         part_count += 1;
-        builder = builder.attachment(att.mime_type, att.filename, att.bytes);
+        builder = builder.attachment(
+            mail_builder::headers::content_type::ContentType::new(att.mime_type),
+            att.filename,
+            mail_builder::mime::BodyPart::Binary(att.bytes),
+        );
     }
     if let Some(irt) = out.in_reply_to {
         builder = builder.in_reply_to(irt.trim_matches(['<', '>']));
@@ -2252,6 +2269,23 @@ pub fn normalize_subject(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_attachment_keeps_source_and_round_trips_large_bytes() {
+        let mut message = outgoing("body", None);
+        message.attachments.push(OutgoingAttachment {
+            filename: "é-large.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            bytes: vec![0x93; 1024 * 1024],
+        });
+        let pointer = message.attachments[0].bytes.as_ptr();
+        let (_, raw) = build_message(&message).unwrap();
+        assert_eq!(message.attachments[0].bytes.as_ptr(), pointer);
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        let part = parsed.attachments().next().unwrap();
+        assert_eq!(part.attachment_name(), Some("é-large.bin"));
+        assert_eq!(part.contents(), message.attachments[0].bytes);
+    }
 
     #[test]
     fn parsed_body_retains_decoded_unicode_and_generated_html_text() {
