@@ -8680,8 +8680,28 @@ mod draft_action_race_tests {
     #[tokio::test]
     async fn deleting_a_jmap_draft_cancels_a_queued_send() {
         let (core, _temp, draft_id, action_id) = jmap_draft_with_send("pending").await;
+        let staged_path = core
+            .paths
+            .draft_attachments_dir()
+            .join("cancelled-send")
+            .join("file.txt");
+        std::fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
+        std::fs::write(&staged_path, b"attachment").unwrap();
+        let stored_path = staged_path.to_string_lossy().into_owned();
+        core.db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO draft_attachments (draft_id, file_path, filename)
+                     VALUES (?1, ?2, 'file.txt')",
+                    rusqlite::params![draft_id, stored_path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         core.delete_draft(draft_id).await.unwrap();
+        assert!(!staged_path.exists());
 
         core.db
             .read(move |conn| {
