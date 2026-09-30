@@ -1032,8 +1032,12 @@ fn edit_fragment(text: &str, styles: &[ComposeStyleRun], range: Range<usize>) ->
 }
 
 fn style_fragment(styles: &[ComposeStyleRun], range: Range<usize>) -> Vec<ComposeStyleRun> {
-    let mut fragment_styles = Vec::new();
-    for run in styles {
+    let first = styles.partition_point(|run| run.range.end <= range.start);
+    let end = styles
+        .partition_point(|run| run.range.start < range.end)
+        .max(first);
+    let mut fragment_styles = Vec::with_capacity(end - first);
+    for run in &styles[first..end] {
         if run.range.start < range.end && run.range.end > range.start {
             push_style_run(
                 &mut fragment_styles,
@@ -1397,6 +1401,25 @@ mod tests {
         assert_eq!(document.styles.len(), 1);
         assert_eq!(document.styles[0].range, 0..7);
         assert_style_coverage(&document);
+    }
+
+    #[test]
+    fn selected_style_fragment_allocates_only_intersecting_runs() {
+        let styles = (0..1000)
+            .map(|byte| ComposeStyleRun {
+                range: byte..byte + 1,
+                style: CharacterStyle {
+                    marks: if byte % 2 == 0 { BOLD } else { ITALIC },
+                    ..Default::default()
+                },
+            })
+            .collect::<Vec<_>>();
+        let fragment = style_fragment(&styles, 900..903);
+        assert_eq!(fragment.len(), 3);
+        assert_eq!(fragment.capacity(), 3);
+        assert_eq!(fragment[0].range, 0..1);
+        assert_eq!(fragment[2].range, 2..3);
+        assert!(style_fragment(&styles, 900..900).is_empty());
     }
 
     #[test]
