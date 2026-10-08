@@ -745,19 +745,18 @@ pub fn affinity_for(
     if emails.is_empty() {
         return Ok(out);
     }
-    let placeholders = (1..=emails.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT email, send_count * 3 + recv_count FROM contacts WHERE email IN ({placeholders})"
-    );
+    use std::fmt::Write;
+    let mut sql =
+        String::from("SELECT email, send_count * 3 + recv_count FROM contacts WHERE email IN (");
+    for index in 1..=emails.len() {
+        if index > 1 {
+            sql.push(',');
+        }
+        write!(&mut sql, "?{index}").expect("writing to a string cannot fail");
+    }
+    sql.push(')');
     let mut stmt = conn.prepare(&sql)?;
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = emails
-        .iter()
-        .map(|e| e as &dyn rusqlite::types::ToSql)
-        .collect();
-    let rows = stmt.query_map(params_ref.as_slice(), |r| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(emails.iter()), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
     })?;
     for row in rows {
