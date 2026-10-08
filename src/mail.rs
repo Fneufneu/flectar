@@ -2371,10 +2371,13 @@ fn relative_time_at(timestamp_ms: i64, now: DateTime<Local>) -> String {
 }
 
 fn text_to_html(text: &str) -> String {
-    format!(
-        "<html><body style=\"font-family:Arial,sans-serif;padding:32px;line-height:1.6;color:#303348\"><pre style=\"margin:0;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere\">{}</pre></body></html>",
-        escape_html(text)
-    )
+    const PREFIX: &str = "<html><body style=\"font-family:Arial,sans-serif;padding:32px;line-height:1.6;color:#303348\"><pre style=\"margin:0;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere\">";
+    const SUFFIX: &str = "</pre></body></html>";
+    let mut html = String::with_capacity(PREFIX.len() + text.len() + SUFFIX.len());
+    html.push_str(PREFIX);
+    crate::email_document::append_escaped(&mut html, text);
+    html.push_str(SUFFIX);
+    html
 }
 
 fn markdown_options() -> Options {
@@ -2432,13 +2435,6 @@ fn markdown_to_plain_text(markdown: &str) -> String {
         }
     }
     output.trim_end().to_owned()
-}
-
-fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[cfg(test)]

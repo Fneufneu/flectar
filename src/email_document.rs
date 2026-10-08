@@ -22,7 +22,7 @@ pub fn escape(text: &str) -> String {
     output
 }
 
-fn append_escaped(output: &mut String, text: &str) {
+pub(crate) fn append_escaped(output: &mut String, text: &str) {
     let mut start = 0;
     for (index, byte) in text.bytes().enumerate() {
         let escaped = match byte {
