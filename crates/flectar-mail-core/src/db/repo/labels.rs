@@ -194,20 +194,19 @@ pub fn save_with_descendants(
     let subtree_ids = std::iter::once(previous.id)
         .chain(descendants.iter().map(|label| label.id))
         .collect::<std::collections::HashSet<_>>();
-    let target_names = std::iter::once(name.to_owned())
-        .chain(descendants.iter().map(|label| {
-            format!(
+    let target_names =
+        std::iter::once(std::borrow::Cow::Borrowed(name)).chain(descendants.iter().map(|label| {
+            std::borrow::Cow::Owned(format!(
                 "{replacement_prefix}{}",
                 label.name.strip_prefix(&prefix).unwrap_or(&label.name)
-            )
-        }))
-        .collect::<Vec<_>>();
+            ))
+        }));
 
-    for target in &target_names {
+    for target in target_names {
         if all_labels.iter().any(|label| {
             label.owner_account_id == previous.owner_account_id
                 && !subtree_ids.contains(&label.id)
-                && label.name.eq_ignore_ascii_case(target)
+                && label.name.eq_ignore_ascii_case(&target)
         }) {
             return Err(CoreError::Other(format!(
                 "a label named '{target}' already exists in this scope"
