@@ -91,18 +91,18 @@ fn transition_rows(
 ) -> Vec<SidebarRow> {
     let current_keys = current
         .iter()
-        .map(|row| row.key.to_string())
+        .map(|row| row.key.clone())
         .collect::<HashSet<_>>();
     let target_keys = rows
         .iter()
-        .map(|row| row.key.to_string())
+        .map(|row| row.key.clone())
         .collect::<HashSet<_>>();
-    let mut before = HashMap::<String, Vec<SidebarRow>>::new();
+    let mut before = HashMap::<slint::SharedString, Vec<SidebarRow>>::new();
     let mut trailing = Vec::new();
     let mut next = None;
     for mut row in current.into_iter().rev() {
         if target_keys.contains(row.key.as_str()) {
-            next = Some(row.key.to_string());
+            next = Some(row.key.clone());
         } else {
             row.show_row = false;
             row.reveal_row = false;
