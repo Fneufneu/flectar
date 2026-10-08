@@ -8,10 +8,35 @@ const MAX_DEPTH: usize = 96;
 const MAX_TEXT_BYTES: usize = 1_000_000;
 
 pub fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    let extra: usize = text
+        .bytes()
+        .map(|byte| match byte {
+            b'&' => 4,
+            b'<' | b'>' => 3,
+            b'"' => 5,
+            _ => 0,
+        })
+        .sum();
+    let mut output = String::with_capacity(text.len() + extra);
+    append_escaped(&mut output, text);
+    output
+}
+
+fn append_escaped(output: &mut String, text: &str) {
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        let escaped = match byte {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => continue,
+        };
+        output.push_str(&text[start..index]);
+        output.push_str(escaped);
+        start = index + 1;
+    }
+    output.push_str(&text[start..]);
 }
 
 #[derive(Default)]
@@ -335,6 +360,13 @@ pub fn export_html(html: &str, print: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn escaping_reserves_only_the_final_unicode_output() {
+        let text = "<&\"é👩‍🚀>".repeat(10_000);
+        let escaped = escape(&text);
+        assert_eq!(escaped, "&lt;&amp;&quot;é👩‍🚀&gt;".repeat(10_000));
+        assert_eq!(escaped.capacity(), escaped.len());
+    }
     #[test]
     fn generated_css_precision_and_identifiers_are_not_complexity() {
         for css in [
