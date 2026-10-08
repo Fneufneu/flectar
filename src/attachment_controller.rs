@@ -35,7 +35,7 @@ pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
         (0..rows.row_count())
             .filter_map(|index| rows.row_data(index))
             .filter(|row| row.has_thumbnail)
-            .map(|row| (row.id.to_string(), row.thumbnail))
+            .map(|row| (row.id, row.thumbnail))
             .collect::<std::collections::HashMap<_, _>>()
     });
     if !same {
@@ -50,25 +50,37 @@ pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
             }
         }
     }
-    let thumbnail_ids = email
-        .attachments
-        .iter()
-        .filter(|attachment| {
-            thumbnail_candidate(attachment)
-                && rows
-                    .iter()
-                    .find(|row| row.id.as_str() == attachment.id.to_string())
-                    .is_some_and(|row| !row.has_thumbnail)
-        })
-        .take(4)
-        .map(|attachment| attachment.id.to_string())
-        .collect::<Vec<_>>();
+    let thumbnail_ids = thumbnail_ids(&email.attachments, &rows);
     app.global::<MailAttachments>()
         .set_rows(ModelRc::new(VecModel::from(rows)));
     for id in thumbnail_ids {
         app.global::<MailAttachments>()
             .invoke_command("thumbnail".into(), id.into());
     }
+}
+
+fn visible_attachment(attachment: &flectar_mail_core::models::AttachmentMeta) -> bool {
+    !attachment.is_inline
+        || attachment
+            .filename
+            .as_ref()
+            .is_some_and(|name| !name.trim().is_empty())
+}
+
+// attachment_rows preserves this filtered metadata order. Walk the two in
+// lockstep instead of formatting an ID for every row in a nested search.
+fn thumbnail_ids(
+    attachments: &[flectar_mail_core::models::AttachmentMeta],
+    rows: &[MailAttachment],
+) -> Vec<slint::SharedString> {
+    attachments
+        .iter()
+        .filter(|attachment| visible_attachment(attachment))
+        .zip(rows)
+        .filter(|(attachment, row)| thumbnail_candidate(attachment) && !row.has_thumbnail)
+        .take(4)
+        .map(|(_, row)| row.id.clone())
+        .collect()
 }
 
 fn thumbnail_candidate(attachment: &flectar_mail_core::models::AttachmentMeta) -> bool {
@@ -91,12 +103,7 @@ fn attachment_rows(
 ) -> Vec<MailAttachment> {
     attachments
         .iter()
-        .filter(|a| {
-            !a.is_inline
-                || a.filename
-                    .as_ref()
-                    .is_some_and(|name| !name.trim().is_empty())
-        })
+        .filter(|a| visible_attachment(a))
         .map(|a| {
             let name = a
                 .filename
@@ -340,11 +347,12 @@ pub(crate) fn register(
                 continue;
             };
             let rows = app.global::<MailAttachments>().get_rows();
+            let attachment_id = attachment_id.to_string();
             for index in 0..rows.row_count() {
                 let Some(mut row) = rows.row_data(index) else {
                     continue;
                 };
-                if row.id.as_str() != attachment_id.to_string() {
+                if row.id.as_str() != attachment_id {
                     continue;
                 }
                 row.thumbnail = slint::Image::from_rgba8(
@@ -528,6 +536,27 @@ pub(crate) fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thumbnail_plan_keeps_visible_order_and_four_item_limit() {
+        use flectar_mail_core::models::AttachmentMeta;
+        let files = (0..10)
+            .map(|id| AttachmentMeta {
+                id,
+                filename: (id != 0).then(|| "photo.png".into()),
+                mime_type: Some("image/png".into()),
+                size: Some(42),
+                is_inline: id == 0,
+            })
+            .collect::<Vec<_>>();
+        let mut rows = attachment_rows(&files);
+        rows[0].has_thumbnail = true;
+        let ids = thumbnail_ids(&files, &rows);
+        assert_eq!(
+            ids.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+            ["2", "3", "4", "5"]
+        );
+        assert_eq!(ids[0].as_ptr(), rows[1].id.as_ptr());
+    }
     #[test]
     fn attachment_rows_preserve_large_ids_and_offer_safe_previews() {
         use flectar_mail_core::models::AttachmentMeta;
