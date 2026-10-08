@@ -163,6 +163,23 @@ pub fn list_info(conn: &Connection, account_id: Option<i64>) -> Result<Vec<Folde
         .collect())
 }
 
+fn subtree_pattern(prefix: &str, delimiter: &str) -> String {
+    let extra = prefix
+        .bytes()
+        .chain(delimiter.bytes())
+        .filter(|byte| matches!(byte, b'\\' | b'%' | b'_'))
+        .count();
+    let mut pattern = String::with_capacity(prefix.len() + delimiter.len() + extra + 1);
+    for character in prefix.chars().chain(delimiter.chars()) {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
 pub fn rename_tree(
     conn: &Connection,
     account_id: i64,
@@ -170,21 +187,16 @@ pub fn rename_tree(
     new_prefix: &str,
     delimiter: &str,
 ) -> Result<()> {
-    let descendant_prefix = format!("{old_prefix}{delimiter}");
     let mut stmt = conn.prepare(
         "SELECT id, imap_name FROM folders
          WHERE account_id = ?1 AND (imap_name = ?2 OR imap_name LIKE ?3 ESCAPE '\\')
          ORDER BY LENGTH(imap_name)",
     )?;
-    let escaped = descendant_prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
+    let pattern = subtree_pattern(old_prefix, delimiter);
     let rows = stmt
-        .query_map(
-            params![account_id, old_prefix, format!("{escaped}%")],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?
+        .query_map(params![account_id, old_prefix, pattern], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     for (id, old_name) in rows {
@@ -203,12 +215,7 @@ pub fn delete_tree(
     prefix: &str,
     delimiter: &str,
 ) -> Result<()> {
-    let descendant_prefix = format!("{prefix}{delimiter}");
-    let escaped = descendant_prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let pattern = format!("{escaped}%");
+    let pattern = subtree_pattern(prefix, delimiter);
     let mut stmt = conn.prepare(
         "SELECT DISTINCT m.thread_id
          FROM messages m JOIN folders f ON f.id = m.folder_id
