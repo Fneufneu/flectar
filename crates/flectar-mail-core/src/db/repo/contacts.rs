@@ -233,13 +233,10 @@ pub fn backfill_folded(conn: &Connection) -> Result<()> {
 /// `contacts.folded`, pushing one `%tok%` bind per token. Returns None for
 /// queries with no usable tokens.
 fn folded_clauses(query: &str, bind: &mut Vec<Box<dyn rusqlite::types::ToSql>>) -> Option<String> {
+    use std::fmt::Write;
     let folded = fold(query);
-    let tokens: Vec<&str> = folded.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    let mut clauses = Vec::with_capacity(tokens.len());
-    for tok in tokens {
+    let mut clauses = String::new();
+    for tok in folded.split_whitespace() {
         // Escape LIKE wildcards so a literal % or _ in the query can't scan-match.
         let extra = tok
             .bytes()
@@ -255,14 +252,19 @@ fn folded_clauses(query: &str, bind: &mut Vec<Box<dyn rusqlite::types::ToSql>>) 
         }
         pattern.push('%');
         bind.push(Box::new(pattern));
-        clauses.push(format!(
+        if !clauses.is_empty() {
+            clauses.push_str(" AND ");
+        }
+        write!(
+            clauses,
             "LOWER(COALESCE(folded, email) || ' ' || COALESCE(job_title, '') || ' ' ||
                    COALESCE(website, '') || ' ' || COALESCE(postal_address, ''))
              LIKE ?{} ESCAPE '\\'",
             bind.len()
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
-    Some(clauses.join(" AND "))
+    (!clauses.is_empty()).then_some(clauses)
 }
 
 fn record_where_clause(
