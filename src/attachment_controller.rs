@@ -79,11 +79,12 @@ fn thumbnail_candidate(attachment: &flectar_mail_core::models::AttachmentMeta) -
         .split(';')
         .next()
         .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+        .trim();
     attachment.size.is_none_or(|size| size <= 4 * 1024 * 1024)
-        && media.starts_with("image/")
-        && media != "image/svg+xml"
+        && media
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        && !media.eq_ignore_ascii_case("image/svg+xml")
 }
 fn attachment_rows(
     attachments: &[flectar_mail_core::models::AttachmentMeta],
@@ -226,12 +227,11 @@ pub(crate) fn register(
         Arc<flectar_mail_core::Core>,
         Result<(Vec<u8>, u32, u32), String>,
     )>(8);
-    let (thumbnail_job_sender, mut thumbnail_job_receiver) =
-        tokio::sync::mpsc::channel::<(
-            i32,
-            flectar_mail_core::models::AttachmentMeta,
-            Arc<flectar_mail_core::Core>,
-        )>(8);
+    let (thumbnail_job_sender, mut thumbnail_job_receiver) = tokio::sync::mpsc::channel::<(
+        i32,
+        flectar_mail_core::models::AttachmentMeta,
+        Arc<flectar_mail_core::Core>,
+    )>(8);
     let thumbnail_window = weak.clone();
     runtime.handle().spawn(async move {
         while let Some((message, attachment, core)) = thumbnail_job_receiver.recv().await {
@@ -260,9 +260,8 @@ pub(crate) fn register(
             {
                 break;
             }
-            let _ = thumbnail_window.upgrade_in_event_loop(|app| {
-                app.global::<MailAttachments>().invoke_deliver()
-            });
+            let _ = thumbnail_window
+                .upgrade_in_event_loop(|app| app.global::<MailAttachments>().invoke_deliver());
         }
     });
     let thumbnail_pending = Rc::new(RefCell::new(HashSet::<(usize, i32, i64)>::new()));
