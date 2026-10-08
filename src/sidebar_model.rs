@@ -64,7 +64,7 @@ impl SidebarAnimation {
 fn accordion_changed(before: &[SidebarRow], after: &[SidebarRow]) -> bool {
     let previous = before
         .iter()
-        .map(|row| (row.key.to_string(), row))
+        .map(|row| (row.key.as_str(), row))
         .collect::<HashMap<_, _>>();
     after.iter().any(|row| {
         previous.get(row.key.as_str()).is_some_and(|old| {
