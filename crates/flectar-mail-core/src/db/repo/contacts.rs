@@ -241,11 +241,20 @@ fn folded_clauses(query: &str, bind: &mut Vec<Box<dyn rusqlite::types::ToSql>>) 
     let mut clauses = Vec::with_capacity(tokens.len());
     for tok in tokens {
         // Escape LIKE wildcards so a literal % or _ in the query can't scan-match.
-        let esc = tok
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        bind.push(Box::new(format!("%{esc}%")));
+        let extra = tok
+            .bytes()
+            .filter(|byte| matches!(byte, b'\\' | b'%' | b'_'))
+            .count();
+        let mut pattern = String::with_capacity(tok.len() + extra + 2);
+        pattern.push('%');
+        for character in tok.chars() {
+            if matches!(character, '\\' | '%' | '_') {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+        }
+        pattern.push('%');
+        bind.push(Box::new(pattern));
         clauses.push(format!(
             "LOWER(COALESCE(folded, email) || ' ' || COALESCE(job_title, '') || ' ' ||
                    COALESCE(website, '') || ' ' || COALESCE(postal_address, ''))
