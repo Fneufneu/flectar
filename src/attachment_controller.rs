@@ -100,9 +100,9 @@ fn attachment_rows(
         .map(|a| {
             let name = a
                 .filename
-                .clone()
+                .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "attachment".into());
+                .unwrap_or("attachment");
             let media = a
                 .mime_type
                 .as_deref()
@@ -112,15 +112,19 @@ fn attachment_rows(
                 .unwrap_or("")
                 .trim()
                 .to_ascii_lowercase();
+            let previewable = media == "application/pdf"
+                || media.starts_with("image/")
+                || media.starts_with("text/")
+                || matches!(media.as_str(), "application/json" | "application/xml")
+                || name
+                    .as_bytes()
+                    .get(name.len().saturating_sub(4)..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".pdf"));
             MailAttachment {
                 id: a.id.to_string().into(),
-                name: name.clone().into(),
-                detail: media.clone().into(),
-                previewable: media == "application/pdf"
-                    || media.starts_with("image/")
-                    || media.starts_with("text/")
-                    || matches!(media.as_str(), "application/json" | "application/xml")
-                    || name.to_ascii_lowercase().ends_with(".pdf"),
+                name: name.into(),
+                detail: media.into(),
+                previewable,
                 thumbnail: Default::default(),
                 has_thumbnail: false,
             }
