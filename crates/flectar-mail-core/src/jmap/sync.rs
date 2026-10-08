@@ -512,7 +512,7 @@ fn automated_email(email: &Email) -> bool {
 
 async fn sync_emails(ctx: &SyncCtx, config: &AccountConfig, c: &ConnectedClient) -> Result<()> {
     let previous = saved_email_state(ctx, config.id).await?;
-    let (ids, destroyed, checkpoint_state, full) = match previous {
+    let (ids, mut destroyed, checkpoint_state, full) = match previous {
         Some(state) => match changes(c, state).await {
             Ok((ids, destroyed, state)) => (ids, destroyed, state, false),
             Err(CoreError::Jmap(value)) if value == "cannotCalculateChanges" => {
@@ -532,9 +532,6 @@ async fn sync_emails(ctx: &SyncCtx, config: &AccountConfig, c: &ConnectedClient)
         .core_capabilities()
         .map(|v| v.max_objects_in_get().clamp(1, 1000))
         .unwrap_or(256);
-    if !destroyed.is_empty() {
-        persist_emails(ctx, config, Vec::new(), destroyed).await?;
-    }
     // Each Email/get page is committed on its own while the next one is in
     // flight: a first sync fills the mailbox newest first instead of showing
     // nothing until the whole history is downloaded. The email state is only
@@ -546,12 +543,13 @@ async fn sync_emails(ctx: &SyncCtx, config: &AccountConfig, c: &ConnectedClient)
         None => None,
     };
     while let Some((emails, not_found)) = fetched.take() {
+        destroyed.extend(not_found);
         remote_ids.extend(
             emails
                 .iter()
                 .filter_map(|email| email.id().map(str::to_owned)),
         );
-        let persist = persist_emails(ctx, config, emails, not_found);
+        let persist = persist_emails(ctx, config, emails);
         fetched = match chunks.next() {
             Some(chunk) => {
                 let (next, persisted) = tokio::join!(fetch_headers(c, chunk), persist);
@@ -564,7 +562,9 @@ async fn sync_emails(ctx: &SyncCtx, config: &AccountConfig, c: &ConnectedClient)
             }
         };
     }
-    finish_email_sync(ctx, config, remote_ids, checkpoint_state, full).await
+    destroyed.sort();
+    destroyed.dedup();
+    finish_email_sync(ctx, config, remote_ids, destroyed, checkpoint_state, full).await
 }
 
 async fn fetch_headers(c: &ConnectedClient, ids: &[String]) -> Result<(Vec<Email>, Vec<String>)> {
@@ -606,12 +606,7 @@ fn first(values: Option<&[String]>) -> Option<String> {
     values.and_then(|values| values.first()).cloned()
 }
 
-async fn persist_emails(
-    ctx: &SyncCtx,
-    config: &AccountConfig,
-    emails: Vec<Email>,
-    destroyed: Vec<String>,
-) -> Result<()> {
+async fn persist_emails(ctx: &SyncCtx, config: &AccountConfig, emails: Vec<Email>) -> Result<()> {
     let account_id = config.id;
     let (thread_ids, stale_paths) = ctx
         .db
@@ -627,20 +622,6 @@ async fn persist_emails(
                 .collect::<HashSet<_>>();
             let mut changed_threads = HashSet::new();
             let mut stale_paths = Vec::new();
-
-            for remote_id in destroyed {
-                if let Some(row) = repo::messages::by_jmap_id(&tx, account_id, &remote_id)?
-                    && !repo::actions::has_pending_remote_creation(&tx, row.id)?
-                {
-                    if let Some(thread_id) = row.thread_id {
-                        changed_threads.insert(thread_id);
-                    }
-                    if let Some(path) = row.raw_path {
-                        stale_paths.push(path);
-                    }
-                    repo::messages::delete(&tx, row.id)?;
-                }
-            }
 
             for email in emails {
                 let remote_id = email
@@ -916,12 +897,13 @@ async fn persist_emails(
     Ok(())
 }
 
-/// Removes local messages a full listing no longer reports, then records the
-/// email state that later cycles resume from with Email/changes.
+/// Applies remote deletions and full-sync reconciliation before checkpointing.
+/// Waiting for every header page keeps surviving threads and their snoozes alive.
 async fn finish_email_sync(
     ctx: &SyncCtx,
     config: &AccountConfig,
     remote_ids: HashSet<String>,
+    destroyed: Vec<String>,
     state: String,
     full: bool,
 ) -> Result<()> {
@@ -933,6 +915,19 @@ async fn finish_email_sync(
             let tx = conn.transaction()?;
             let mut changed_threads = HashSet::new();
             let mut stale_paths = Vec::new();
+            for remote_id in destroyed {
+                if let Some(row) = repo::messages::by_jmap_id(&tx, account_id, &remote_id)?
+                    && !repo::actions::has_pending_remote_creation(&tx, row.id)?
+                {
+                    if let Some(thread_id) = row.thread_id {
+                        changed_threads.insert(thread_id);
+                    }
+                    if let Some(path) = row.raw_path {
+                        stale_paths.push(path);
+                    }
+                    repo::messages::delete(&tx, row.id)?;
+                }
+            }
             if full {
                 let mut stmt = tx.prepare(
                     "SELECT id,thread_id,raw_path,jmap_id,date FROM messages
@@ -2305,6 +2300,10 @@ async fn fetch_attachment(
     };
     crate::mime::extract_attachment(&raw, &part_id).map(|(bytes, _)| bytes)
 }
+
+#[cfg(test)]
+#[path = "sync_tests.rs"]
+mod sync_tests;
 
 #[cfg(test)]
 mod tests {
