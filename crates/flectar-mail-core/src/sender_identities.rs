@@ -224,8 +224,8 @@ fn parse_gmail_identities(
     let mut seen = HashSet::new();
     let mut identities = Vec::with_capacity(aliases.len());
     for alias in aliases {
-        let email = alias.send_as_email.trim();
-        if !valid_email(email) || !seen.insert(email.to_ascii_lowercase()) {
+        let email = trim_owned(alias.send_as_email);
+        if !valid_email(&email) || !seen.insert(email.to_ascii_lowercase()) {
             return Err(CoreError::Network(
                 "Gmail returned an invalid or duplicate sender identity".into(),
             ));
@@ -245,7 +245,7 @@ fn parse_gmail_identities(
         };
         identities.push(SenderIdentity {
             account_id: account.id,
-            email: email.to_owned(),
+            email,
             display_name: clean_optional(alias.display_name),
             reply_to_email: clean_optional(alias.reply_to_address),
             is_primary: alias.is_primary,
