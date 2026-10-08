@@ -356,15 +356,11 @@ impl GpuEmailRenderer {
     /// Incorporate completed image/font requests into the retained DOM.
     /// Returns true while a bounded post-load polling window is active.
     pub fn poll_resources(&mut self) -> bool {
-        let ticks = self.resource_poll_ticks.load(Ordering::Acquire);
+        // Resource notifications coalesce into one pending poll.
+        let ticks = self.resource_poll_ticks.swap(0, Ordering::AcqRel);
         if ticks == 0 {
             return false;
         }
-        self.resource_poll_ticks
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_sub(1))
-            })
-            .ok();
 
         let _runtime = self
             .resource_runtime
