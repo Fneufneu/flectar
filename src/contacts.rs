@@ -100,7 +100,16 @@ fn contact_avatar_tone(contact: &ContactRecord) -> i32 {
     // normalized email keeps the fallback consistent when a display name is
     // edited and avoids a visibly changing "random" color between launches.
     let mut hash = 0x811c_9dc5_u32;
-    for byte in contact.email.trim().to_lowercase().bytes() {
+    let email = contact.email.trim();
+    // Unicode lowercasing can depend on surrounding characters (Greek sigma).
+    // Keep that normalization for non-ASCII addresses, but hash ordinary email
+    // bytes directly without an intermediate string.
+    let normalized = if email.is_ascii() {
+        std::borrow::Cow::Borrowed(email)
+    } else {
+        std::borrow::Cow::Owned(email.to_lowercase())
+    };
+    for byte in normalized.bytes().map(|byte| byte.to_ascii_lowercase()) {
         hash ^= u32::from(byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
