@@ -196,9 +196,14 @@ impl TokenSink for Sink {
     }
 }
 fn scan(html: &str, emit_export: bool, collect_text: bool) -> Scan {
+    scan_into(html, emit_export, collect_text, String::new())
+}
+
+fn scan_into(html: &str, emit_export: bool, collect_text: bool, export: String) -> Scan {
     let sink = Sink(RefCell::new(Scan {
         emit_export,
         collect_text,
+        export,
         ..Default::default()
     }));
     let tokenizer = Tokenizer::new(sink, Default::default());
@@ -362,7 +367,6 @@ pub fn fallback(html: &str) -> String {
 pub fn export_html(html: &str, print: bool) -> String {
     // Exports never fetch live remote content. Embedded MIME resources remain
     // available; explicit clicked links still open normally in the browser.
-    let clean = scan(html, true, false).export;
     const PRINT: &str = "window.addEventListener('load',()=>window.print())";
     use base64::Engine;
     use sha2::{Digest, Sha256};
@@ -374,14 +378,17 @@ pub fn export_html(html: &str, print: bool) -> String {
     } else {
         "script-src 'none'".into()
     };
-    let script = if print {
-        format!("<script>{PRINT}</script>")
-    } else {
-        String::new()
-    };
-    format!(
-        "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; {policy}; base-uri 'none'; form-action 'none'\"></head><body>{clean}{script}</body></html>"
-    )
+    let prefix = format!(
+        "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; {policy}; base-uri 'none'; form-action 'none'\"></head><body>"
+    );
+    let mut output = scan_into(html, true, false, prefix).export;
+    if print {
+        output.push_str("<script>");
+        output.push_str(PRINT);
+        output.push_str("</script>");
+    }
+    output.push_str("</body></html>");
+    output
 }
 
 #[cfg(test)]
