@@ -14,6 +14,7 @@ import { TypeScale } from "typography.slint";
 export { AppTheme, MotionSettings, ThemeUtilities } from "design-system.slint";
 import { AppTheme, LayoutMetrics } from "design-system.slint";
 import { Button } from "components/button.slint";
+import { LoadingSkeletonBlock } from "components/loading-skeleton.slint";
 import { AccountRow, CalendarDay, CalendarEventRow, CalendarSourceRow, CalendarWeekDay, ComposeAttachment, ComposeContact, ComposeEditorTile, ContactSidebarRow, ContactRow, EmailLink, EmailRow, EmailTemplateRow, EmailTile, LocalizedMessage, MailListEntry, MailProfileRow, SidebarRow, MailLabelRow, StorageUsageRow, ThreadMessageRow } from "models.slint";
 export { EmailReader, ReaderCaret, ReaderImage, ReaderItem, MailDragApi } from "models.slint";
 export { MailListNavigation, MailNavigationTarget } from "models.slint";
@@ -1081,6 +1082,45 @@ export component AppWindow inherits Window {
         Palette.color-scheme = root.theme-mode == "dark" ? ColorScheme.dark
             : root.theme-mode == "light" ? ColorScheme.light
             : ColorScheme.unknown;
+    }
+
+    // Account discovery is asynchronous. Paint a small initial view while
+    // neither the cached mailbox nor the onboarding decision is available.
+    if !root.startup_ready && !root.startup_failed && root.connected_accounts.length == 0 : Rectangle {
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
+        height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
+        background: root.page-bg;
+        accessible-role: groupbox;
+        accessible-label: I18n.loading-local-data();
+
+        VerticalLayout {
+            width: 240px.min(parent.width - 32px);
+            height: 92px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            spacing: 12px;
+            Text {
+                text: "Flectar Mail";
+                color: root.title-color;
+                font-size: TypeScale.heading;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: I18n.loading-local-data();
+                color: root.muted-text;
+                font-size: TypeScale.body;
+                horizontal-alignment: center;
+            }
+            LoadingSkeletonBlock {
+                height: 4px;
+                radius: 2px;
+                base-color: root.border;
+                highlight-color: root.accent;
+            }
+        }
     }
 
     if root.connected_accounts.length > 0 : Rectangle {

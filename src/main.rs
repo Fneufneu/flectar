@@ -95,8 +95,8 @@ use slint::{DataTransfer, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, 
 use startup::{
     PendingCoreUpdates, StartupCalendarSnapshot, StartupSnapshot, StartupUpdate,
     WarmStartCacheWriter, WarmStartProjection, WarmStartSnapshot, apply_settings,
-    load_startup_calendar_snapshot, load_startup_mail_metadata, load_startup_snapshot,
-    load_warm_start_snapshot, spawn_core_event_listener,
+    apply_warm_start_snapshot, load_startup_calendar_snapshot, load_startup_mail_metadata,
+    load_startup_snapshot, load_warm_start_snapshot, spawn_core_event_listener,
 };
 use startup_metrics::StartupMetrics;
 use std::{
@@ -3576,40 +3576,12 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                 StartupUpdate::Warm { snapshot, applied } => {
                     let snapshot = *snapshot;
                     let saved_at_ms = snapshot.saved_at_ms;
-                    {
-                        let mut state = startup_state.borrow_mut();
-                        // Core is deliberately left unset. The global startup
-                        // guard keeps callbacks inert while this saved view is
-                        // visible behind it.
-                        state.using_core = true;
-                        state.scope = snapshot.scope;
-                        state.inbox_count = snapshot.inbox_count;
-                        state.next_cursor = snapshot.next_cursor.map(MailCursor::Thread);
-                        state.connected_accounts = snapshot.accounts;
-                        state.messages = snapshot
-                            .messages
-                            .into_iter()
-                            .map(MailMessage::from)
-                            .collect();
-                        state.mailboxes = snapshot
-                            .mailboxes
-                            .into_iter()
-                            .map(MailboxEntry::from)
-                            .collect();
-                        state.unified_mailboxes = snapshot
-                            .unified_mailboxes
-                            .into_iter()
-                            .map(MailboxEntry::from)
-                            .collect();
-                        state.preview_closed = true;
-                    }
-                    refresh_rows_only(&app, &startup_state, &startup_runtime);
-                    refresh_list_metadata(&app, &startup_state);
-                    app.set_startup_hydrated(true);
+                    apply_warm_start_snapshot(&app, &startup_state, &startup_runtime, snapshot);
                     startup_metrics_for_ui.emit_once(
                         "warm_cache_applied",
                         serde_json::json!({
                             "saved_at_ms": saved_at_ms,
+                            "accounts": app.get_connected_accounts().row_count(),
                             "rows": startup_state.borrow().messages.len(),
                         }),
                     );
@@ -3969,7 +3941,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
         platform.credentials.clone(),
         platform.oauth_redirects.clone(),
         startup_tx,
-        startup_metrics,
+        startup_metrics.clone(),
     );
 
     render_current(&app, &state, &runtime)?;
@@ -7124,6 +7096,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     // tray participates in the same process-wide event loop. This is Slint's
     // documented multi-component pattern; calling AppWindow::run() here would
     // redundantly show the main window a second time.
+    startup_metrics.emit("event_loop_entered", serde_json::Value::Null);
     let event_loop_result = if benchmark_tray {
         slint::run_event_loop_until_quit()
     } else {

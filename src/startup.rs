@@ -1,12 +1,15 @@
 //! Background startup snapshot and coalesced core-event ingestion.
 
 use crate::{
-    AppTheme, AppWindow, MessageColors, PAGE_SIZE,
+    AccountRow, AppTheme, AppWindow, InboxState, MessageColors, PAGE_SIZE,
+    account_controller::apply_connected_account_rows,
+    avatar_initials,
     calendar::{
         LocalCalendarAccount, LocalCalendarEvent, LocalCalendarSource, calendar_accounts,
         calendar_range_millis, calendar_sources, core_calendar_event,
     },
-    mail::{self, CoreMailSource},
+    mail::{self, CoreMailSource, MailCursor, MailMessage, MailboxEntry},
+    mail_view_model::{refresh_list_metadata, refresh_rows_only},
     startup_metrics::StartupMetrics,
     theme::stored_color,
     ui_dispatch::UiWake,
@@ -22,8 +25,10 @@ use flectar_mail_core::{
 use serde::{Deserialize, Serialize};
 use slint::ComponentHandle;
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 use tokio::io::AsyncReadExt;
@@ -283,6 +288,72 @@ impl WarmStartSnapshot {
             && self.unified_mailboxes.len() <= MAX_WARM_START_MAILBOXES
             && !self.scope.trim().is_empty()
     }
+}
+
+pub(crate) fn apply_warm_start_snapshot(
+    app: &AppWindow,
+    state: &Rc<RefCell<InboxState>>,
+    runtime: &tokio::runtime::Runtime,
+    snapshot: WarmStartSnapshot,
+) {
+    // The cache contains account summaries, not connection settings. Project
+    // these directly: the full settings projection requires AccountConfig and
+    // would filter every cached account out before the database has opened.
+    let account_rows = snapshot
+        .accounts
+        .iter()
+        .filter_map(|account| {
+            let name = account
+                .display_name
+                .as_ref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&account.email);
+            Some(AccountRow {
+                id: i32::try_from(account.id).ok()?,
+                drag_key: account.id.to_string().into(),
+                name: name.as_str().into(),
+                email: account.email.as_str().into(),
+                provider: account.provider.as_str().into(),
+                mail_protocol: account.mail_protocol.as_str().into(),
+                status: account.sync_state.as_str().into(),
+                sync_error: account.sync_error.as_deref().unwrap_or_default().into(),
+                initials: avatar_initials(name).into(),
+                ..Default::default()
+            })
+        })
+        .collect();
+    {
+        let mut state = state.borrow_mut();
+        // Core remains unset: cached rows are only a presentation until local
+        // storage is ready, and the startup guard keeps actions inert.
+        state.using_core = true;
+        state.scope = snapshot.scope;
+        state.inbox_count = snapshot.inbox_count;
+        state.next_cursor = snapshot.next_cursor.map(MailCursor::Thread);
+        state.connected_accounts = snapshot.accounts;
+        state.messages = snapshot
+            .messages
+            .into_iter()
+            .map(MailMessage::from)
+            .collect();
+        state.mailboxes = snapshot
+            .mailboxes
+            .into_iter()
+            .map(MailboxEntry::from)
+            .collect();
+        state.unified_mailboxes = snapshot
+            .unified_mailboxes
+            .into_iter()
+            .map(MailboxEntry::from)
+            .collect();
+        state.preview_closed = true;
+    }
+    // The mailbox is a conditional element keyed on Slint's account model.
+    // Publishing only the cached rows leaves that entire view uninstantiated.
+    apply_connected_account_rows(app, account_rows);
+    refresh_rows_only(app, state, runtime);
+    refresh_list_metadata(app, state);
+    app.set_startup_hydrated(true);
 }
 
 #[derive(Clone)]
@@ -701,6 +772,116 @@ pub(crate) fn apply_settings(app: &AppWindow, settings: &Settings) {
 mod warm_start_tests {
     use super::*;
     use flectar_mail_core::models::{AuthKind, MailProtocol, Provider};
+    use slint::platform::{
+        Platform, WindowAdapter,
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+    };
+    use slint::{Model, Rgb8Pixel};
+
+    struct Headless(Rc<MinimalSoftwareWindow>);
+
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn warm_start_paints_accounts_and_rows_before_core_ready() {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.window().set_size(slint::PhysicalSize::new(1320, 800));
+        app.show().unwrap();
+        let render = |name: &str| {
+            slint::platform::update_timers_and_animations();
+            app.window().request_redraw();
+            let size = app.window().size();
+            let mut pixels = vec![Rgb8Pixel::default(); (size.width * size.height) as usize];
+            window.draw_if_needed(|renderer| {
+                renderer.render(&mut pixels, size.width as usize);
+            });
+            if let Some(directory) = std::env::var_os("FLECTAR_STARTUP_REVIEW_DIR") {
+                let directory = PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                let bytes: Vec<u8> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+                image::save_buffer(
+                    directory.join(format!("{name}.png")),
+                    &bytes,
+                    size.width,
+                    size.height,
+                    image::ColorType::Rgb8,
+                )
+                .unwrap();
+            }
+            pixels
+        };
+        let mut loading_frames = Vec::new();
+        for theme in ["light", "dark"] {
+            app.set_theme_mode(theme.into());
+            let frame = render(&format!("loading-{theme}"));
+            assert!(
+                frame.iter().any(|pixel| *pixel != frame[0]),
+                "account discovery must display a loading view instead of a blank window"
+            );
+            loading_frames.push(frame);
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let (favicons, _) = crate::bounded_ui_channel();
+        let (avatars, _) = crate::bounded_ui_channel();
+        let state = crate::InboxState::empty(
+            None,
+            crate::UiSender::new(favicons, UiWake::new(app.as_weak(), |_| {})),
+            None,
+            crate::UiSender::new(avatars, UiWake::new(app.as_weak(), |_| {})),
+            false,
+            false,
+            WarmStartCacheWriter::spawn(&runtime, temporary.path().join("warm.json")),
+        );
+        app.set_emails(state.email_rows.clone().into());
+        app.set_mail_list_entries(state.mail_list_entries.clone().into());
+        app.set_sidebar_rows(state.sidebar_rows.clone().into());
+        let state = Rc::new(RefCell::new(state));
+        let snapshot = WarmStartSnapshot::capture(WarmStartProjection {
+            scope: "Person / Inbox",
+            inbox_count: 3,
+            next_cursor: None,
+            accounts: &[account()],
+            messages: &[message()],
+            mailboxes: &[mailbox()],
+            unified_mailboxes: &[],
+        });
+
+        apply_warm_start_snapshot(&app, &state, &runtime, snapshot);
+
+        assert!(app.get_startup_hydrated());
+        assert!(!app.get_startup_ready());
+        assert!(state.borrow().core.is_none());
+        assert!(state.borrow().messages[0].html.is_none());
+        assert_eq!(app.get_connected_accounts().row_count(), 1);
+        assert_eq!(app.get_connected_accounts().row_data(0).unwrap().id, 7);
+        assert_eq!(app.get_emails().row_count(), 1);
+        assert_eq!(
+            app.get_emails().row_data(0).unwrap().subject,
+            "Cached subject"
+        );
+        assert!(app.get_sidebar_rows().row_count() > 0);
+        for (index, theme) in ["light", "dark"].into_iter().enumerate() {
+            app.set_theme_mode(theme.into());
+            assert_ne!(render(&format!("cached-{theme}")), loading_frames[index]);
+        }
+        app.window().set_size(slint::PhysicalSize::new(390, 844));
+        render("cached-compact");
+        assert!(
+            !app.get_startup_ready(),
+            "rendering cached mail must not unlock storage actions"
+        );
+    }
 
     fn account() -> Account {
         Account {
