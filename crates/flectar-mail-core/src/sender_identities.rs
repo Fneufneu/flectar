@@ -224,8 +224,8 @@ fn parse_gmail_identities(
     let mut seen = HashSet::new();
     let mut identities = Vec::with_capacity(aliases.len());
     for alias in aliases {
-        let email = alias.send_as_email.trim();
-        if !valid_email(email) || !seen.insert(email.to_ascii_lowercase()) {
+        let email = trim_owned(alias.send_as_email);
+        if !valid_email(&email) || !seen.insert(email.to_ascii_lowercase()) {
             return Err(CoreError::Network(
                 "Gmail returned an invalid or duplicate sender identity".into(),
             ));
@@ -245,7 +245,7 @@ fn parse_gmail_identities(
         };
         identities.push(SenderIdentity {
             account_id: account.id,
-            email: email.to_owned(),
+            email,
             display_name: clean_optional(alias.display_name),
             reply_to_email: clean_optional(alias.reply_to_address),
             is_primary: alias.is_primary,
@@ -287,8 +287,22 @@ pub(crate) fn parse_gmail_identities_value(
 
 fn clean_optional(value: Option<String>) -> Option<String> {
     value
-        .map(|value| value.trim().to_owned())
+        .map(trim_owned)
         .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+}
+
+fn trim_owned(mut value: String) -> String {
+    value.truncate(value.trim_end().len());
+    let start = value.len() - value.trim_start().len();
+    if start > 0 {
+        value.drain(..start);
+    }
+    // Moving a short retained field must not keep a provider response's large
+    // whitespace buffer alive. Ordinary fields keep their existing allocation.
+    if value.capacity() > value.len().saturating_mul(2).max(64) {
+        value.shrink_to_fit();
+    }
+    value
 }
 
 fn valid_email(value: &str) -> bool {
@@ -308,6 +322,18 @@ fn valid_email(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::models::{AccountSettings, AuthKind, MailProtocol};
+    #[test]
+    fn retained_optional_fields_reuse_storage_without_whitespace_capacity() {
+        let value = "  Display name  ".to_owned();
+        let pointer = value.as_ptr();
+        let clean = clean_optional(Some(value)).unwrap();
+        assert_eq!(clean, "Display name");
+        assert_eq!(clean.as_ptr(), pointer);
+        let padded = format!("{}é{}", " ".repeat(100_000), " ".repeat(100_000));
+        let clean = clean_optional(Some(padded)).unwrap();
+        assert_eq!(clean, "é");
+        assert_eq!(clean.capacity(), "é".len());
+    }
 
     fn account() -> AccountConfig {
         AccountConfig {

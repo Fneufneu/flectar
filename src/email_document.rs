@@ -8,26 +8,55 @@ const MAX_DEPTH: usize = 96;
 const MAX_TEXT_BYTES: usize = 1_000_000;
 
 pub fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    let extra: usize = text
+        .bytes()
+        .map(|byte| match byte {
+            b'&' => 4,
+            b'<' | b'>' => 3,
+            b'"' => 5,
+            _ => 0,
+        })
+        .sum();
+    let mut output = String::with_capacity(text.len() + extra);
+    append_escaped(&mut output, text);
+    output
+}
+
+pub(crate) fn append_escaped(output: &mut String, text: &str) {
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        let escaped = match byte {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => continue,
+        };
+        output.push_str(&text[start..index]);
+        output.push_str(escaped);
+        start = index + 1;
+    }
+    output.push_str(&text[start..]);
 }
 
 #[derive(Default)]
 struct Scan {
-    stack: Vec<String>,
+    stack: Vec<html5ever::LocalName>,
     count: usize,
     excessive: bool,
     text: String,
     remote: bool,
     export: String,
-    raw: Option<String>,
+    raw: Option<html5ever::LocalName>,
     emit_export: bool,
+    collect_text: bool,
     truncated: bool,
 }
 impl Scan {
     fn append_text(&mut self, text: &str) {
+        if !self.collect_text {
+            return;
+        }
         let remaining = MAX_TEXT_BYTES.saturating_sub(self.text.len());
         let end = text.floor_char_boundary(remaining.min(text.len()));
         self.text.push_str(&text[..end]);
@@ -44,21 +73,23 @@ impl TokenSink for Sink {
         let mut s = self.0.borrow_mut();
         match token {
             Token::TagToken(tag) => {
-                let name = tag.name.to_string();
+                let name = tag.name;
                 if tag.kind == TagKind::EndTag {
                     if let Some(index) = s.stack.iter().rposition(|n| n == &name) {
                         s.stack.truncate(index);
                     }
-                    if matches!(name.as_str(), "script" | "style" | "title") {
+                    if matches!(name.as_ref(), "script" | "style" | "title") {
                         s.raw = None;
                     }
                     if s.emit_export
-                        && !matches!(name.as_str(), "meta" | "base" | "link" | "script")
+                        && !matches!(name.as_ref(), "meta" | "base" | "link" | "script")
                     {
-                        s.export.push_str(&format!("</{name}>"));
+                        s.export.push_str("</");
+                        s.export.push_str(&name);
+                        s.export.push('>');
                     }
                     if matches!(
-                        name.as_str(),
+                        name.as_ref(),
                         "p" | "div" | "tr" | "li" | "pre" | "h1" | "h2" | "h3"
                     ) {
                         s.append_text("\n");
@@ -66,7 +97,7 @@ impl TokenSink for Sink {
                 } else {
                     s.count += 1;
                     if !matches!(
-                        name.as_str(),
+                        name.as_ref(),
                         "area"
                             | "base"
                             | "br"
@@ -100,37 +131,42 @@ impl TokenSink for Sink {
                         {
                             s.excessive = true;
                         }
-                        if (name == "img" && attr.name.local.as_ref() == "src" && is_remote(value))
+                        if (name.as_ref() == "img"
+                            && attr.name.local.as_ref() == "src"
+                            && is_remote(value))
                             || (attr.name.local.as_ref() == "style" && css_remote(value))
                         {
                             s.remote = true;
                         }
                     }
                     if s.emit_export
-                        && !matches!(name.as_str(), "meta" | "base" | "link" | "script")
+                        && !matches!(name.as_ref(), "meta" | "base" | "link" | "script")
                     {
                         s.export.push('<');
                         s.export.push_str(&name);
                         for attr in &tag.attrs {
                             let n = attr.name.local.as_ref();
                             if !n.starts_with("on") && n != "srcdoc" {
-                                s.export
-                                    .push_str(&format!(" {n}=\"{}\"", escape(&attr.value)));
+                                s.export.push(' ');
+                                s.export.push_str(n);
+                                s.export.push_str("=\"");
+                                append_escaped(&mut s.export, &attr.value);
+                                s.export.push('"');
                             }
                         }
                         s.export.push('>');
                     }
-                    if name == "br" {
+                    if name.as_ref() == "br" {
                         s.append_text("\n");
                     }
-                    if name == "img"
+                    if name.as_ref() == "img"
                         && let Some(alt) = tag.attrs.iter().find(|a| a.name.local.as_ref() == "alt")
                     {
                         s.append_text(&alt.value);
                     }
-                    if matches!(name.as_str(), "script" | "style" | "title") {
+                    if matches!(name.as_ref(), "script" | "style" | "title") {
                         s.raw = Some(name.clone());
-                        return TokenSinkResult::RawData(if name == "title" {
+                        return TokenSinkResult::RawData(if name.as_ref() == "title" {
                             html5ever::tokenizer::states::RawKind::Rcdata
                         } else {
                             html5ever::tokenizer::states::RawKind::Rawtext
@@ -147,7 +183,7 @@ impl TokenSink for Sink {
                     }
                 } else if s.raw.as_deref() != Some("script") {
                     if s.emit_export {
-                        s.export.push_str(&escape(&text));
+                        append_escaped(&mut s.export, &text);
                     }
                     if s.raw.is_none() {
                         s.append_text(&text);
@@ -159,9 +195,15 @@ impl TokenSink for Sink {
         TokenSinkResult::Continue
     }
 }
-fn scan(html: &str, emit_export: bool) -> Scan {
+fn scan(html: &str, emit_export: bool, collect_text: bool) -> Scan {
+    scan_into(html, emit_export, collect_text, String::new())
+}
+
+fn scan_into(html: &str, emit_export: bool, collect_text: bool, export: String) -> Scan {
     let sink = Sink(RefCell::new(Scan {
         emit_export,
+        collect_text,
+        export,
         ..Default::default()
     }));
     let tokenizer = Tokenizer::new(sink, Default::default());
@@ -184,7 +226,7 @@ fn css_tokens_excessive(parser: &mut cssparser::Parser<'_, '_>, depth: usize) ->
     if depth > 64 {
         return true;
     }
-    while let Ok(token) = parser.next().cloned() {
+    while let Ok(token) = parser.next() {
         match token {
             // Bound numeric magnitude, not decimal precision or digits in URLs,
             // selectors, comments, strings, and colors. Marketing generators
@@ -199,10 +241,10 @@ fn css_tokens_excessive(parser: &mut cssparser::Parser<'_, '_>, depth: usize) ->
             {
                 return true;
             }
-            CssToken::Function(ref name) if name.eq_ignore_ascii_case("url") => {
+            CssToken::Function(name) if name.eq_ignore_ascii_case("url") => {
                 // Contents are resource identifiers, not layout expressions.
             }
-            CssToken::Function(ref name) => {
+            CssToken::Function(name) => {
                 let repeat = name.eq_ignore_ascii_case("repeat");
                 let mut excessive = false;
                 let _: Result<(), cssparser::ParseError<'_, ()>> =
@@ -258,25 +300,39 @@ fn readable_fallback(text: &str) -> String {
             blank = false;
         }
     }
-    result.trim_end().to_owned()
+    result.truncate(result.trim_end().len());
+    result
 }
 
 fn is_remote(value: &str) -> bool {
-    let value = value.trim().to_ascii_lowercase();
-    value.starts_with("https:") || value.starts_with("http:") || value.starts_with("//")
+    let value = value.trim().as_bytes();
+    value
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https:"))
+        || value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http:"))
+        || value.starts_with(b"//")
 }
 fn css_remote(css: &str) -> bool {
-    let css = css.to_ascii_lowercase();
     // CSS escapes are conservatively counted as remote when a URL is present.
-    css.contains("url(")
-        && (css.contains("http:")
-            || css.contains("https:")
+    contains_ascii_case_insensitive(css, b"url(")
+        && (contains_ascii_case_insensitive(css, b"http:")
+            || contains_ascii_case_insensitive(css, b"https:")
             || css.contains("//")
             || css.contains('\\'))
+}
+
+fn contains_ascii_case_insensitive(value: &str, needle: &[u8]) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 pub fn has_remote_images(html: &str) -> bool {
     scan(
         &html[..html.floor_char_boundary(html.len().min(MAX_HTML_BYTES))],
+        false,
         false,
     )
     .remote
@@ -285,7 +341,7 @@ pub fn bounded_html(html: &str) -> (String, Option<String>) {
     if html.len() > MAX_HTML_BYTES {
         return ("<p>This message is too large to render. Use the original source or plain text view.</p>".into(), Some("Message exceeds the HTML size limit.".into()));
     }
-    let s = scan(html, false);
+    let s = scan(html, false, true);
     if s.excessive {
         return (
             format!(
@@ -302,6 +358,7 @@ pub fn fallback(html: &str) -> String {
         &scan(
             &html[..html.floor_char_boundary(html.len().min(MAX_HTML_BYTES))],
             false,
+            true,
         )
         .text,
     )
@@ -310,7 +367,6 @@ pub fn fallback(html: &str) -> String {
 pub fn export_html(html: &str, print: bool) -> String {
     // Exports never fetch live remote content. Embedded MIME resources remain
     // available; explicit clicked links still open normally in the browser.
-    let clean = scan(html, true).export;
     const PRINT: &str = "window.addEventListener('load',()=>window.print())";
     use base64::Engine;
     use sha2::{Digest, Sha256};
@@ -322,19 +378,80 @@ pub fn export_html(html: &str, print: bool) -> String {
     } else {
         "script-src 'none'".into()
     };
-    let script = if print {
-        format!("<script>{PRINT}</script>")
-    } else {
-        String::new()
-    };
-    format!(
-        "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; {policy}; base-uri 'none'; form-action 'none'\"></head><body>{clean}{script}</body></html>"
-    )
+    let prefix = format!(
+        "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; {policy}; base-uri 'none'; form-action 'none'\"></head><body>"
+    );
+    let mut output = scan_into(html, true, false, prefix).export;
+    if print {
+        output.push_str("<script>");
+        output.push_str(PRINT);
+        output.push_str("</script>");
+    }
+    output.push_str("</body></html>");
+    output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_checks_preserve_ascii_case_and_unicode_edges() {
+        for value in [
+            " HtTpS://test.dev/a ",
+            "HTTP:x",
+            "//test.dev",
+            "éHTTPS:x",
+            "https",
+            "cid:x",
+            "",
+        ] {
+            let old = value.trim().to_ascii_lowercase();
+            assert_eq!(
+                is_remote(value),
+                old.starts_with("https:") || old.starts_with("http:") || old.starts_with("//")
+            );
+        }
+        for value in [
+            "éURL(HTTPS:x)",
+            "URL(\\68ttp:x)",
+            "url(cid:x)",
+            "Url(//test.dev)",
+            "url(x) HTTP:y",
+            "url",
+            "",
+        ] {
+            let old = value.to_ascii_lowercase();
+            assert_eq!(
+                css_remote(value),
+                old.contains("url(")
+                    && (old.contains("http:")
+                        || old.contains("https:")
+                        || old.contains("//")
+                        || old.contains('\\'))
+            );
+        }
+    }
+    #[test]
+    fn escaping_reserves_only_the_final_unicode_output() {
+        let text = "<&\"é👩‍🚀>".repeat(10_000);
+        let escaped = escape(&text);
+        assert_eq!(escaped, "&lt;&amp;&quot;é👩‍🚀&gt;".repeat(10_000));
+        assert_eq!(escaped.capacity(), escaped.len());
+    }
+    #[test]
+    fn remote_and_export_scans_do_not_retain_recovery_text() {
+        let html = format!(
+            "<p>{}</p><img src='https://example.test/a'>",
+            "é".repeat(500_000)
+        );
+        let remote = scan(&html, false, false);
+        assert!(remote.remote);
+        assert_eq!(remote.text.capacity(), 0);
+        let export = scan(&html, true, false);
+        assert!(export.export.contains("é"));
+        assert_eq!(export.text.capacity(), 0);
+        assert_eq!(scan(&html, false, true).text.len(), MAX_TEXT_BYTES);
+    }
     #[test]
     fn generated_css_precision_and_identifiers_are_not_complexity() {
         for css in [
@@ -405,7 +522,7 @@ mod tests {
         ));
         assert!(!has_remote_images("<a href='https://example.com'>link</a>"));
         let huge = "é".repeat(MAX_TEXT_BYTES);
-        let result = scan(&huge, false);
+        let result = scan(&huge, false, true);
         assert!(result.truncated);
         assert!(result.text.len() <= MAX_TEXT_BYTES);
         assert!(bounded_html(&huge).1.unwrap().contains("display limit"));

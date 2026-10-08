@@ -35,7 +35,7 @@ pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
         (0..rows.row_count())
             .filter_map(|index| rows.row_data(index))
             .filter(|row| row.has_thumbnail)
-            .map(|row| (row.id.to_string(), row.thumbnail))
+            .map(|row| (row.id, row.thumbnail))
             .collect::<std::collections::HashMap<_, _>>()
     });
     if !same {
@@ -50,25 +50,37 @@ pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
             }
         }
     }
-    let thumbnail_ids = email
-        .attachments
-        .iter()
-        .filter(|attachment| {
-            thumbnail_candidate(attachment)
-                && rows
-                    .iter()
-                    .find(|row| row.id.as_str() == attachment.id.to_string())
-                    .is_some_and(|row| !row.has_thumbnail)
-        })
-        .take(4)
-        .map(|attachment| attachment.id.to_string())
-        .collect::<Vec<_>>();
+    let thumbnail_ids = thumbnail_ids(&email.attachments, &rows);
     app.global::<MailAttachments>()
         .set_rows(ModelRc::new(VecModel::from(rows)));
     for id in thumbnail_ids {
         app.global::<MailAttachments>()
-            .invoke_command("thumbnail".into(), id.into());
+            .invoke_command("thumbnail".into(), id);
     }
+}
+
+fn visible_attachment(attachment: &flectar_mail_core::models::AttachmentMeta) -> bool {
+    !attachment.is_inline
+        || attachment
+            .filename
+            .as_ref()
+            .is_some_and(|name| !name.trim().is_empty())
+}
+
+// attachment_rows preserves this filtered metadata order. Walk the two in
+// lockstep instead of formatting an ID for every row in a nested search.
+fn thumbnail_ids(
+    attachments: &[flectar_mail_core::models::AttachmentMeta],
+    rows: &[MailAttachment],
+) -> Vec<slint::SharedString> {
+    attachments
+        .iter()
+        .filter(|attachment| visible_attachment(attachment))
+        .zip(rows)
+        .filter(|(attachment, row)| thumbnail_candidate(attachment) && !row.has_thumbnail)
+        .take(4)
+        .map(|(_, row)| row.id.clone())
+        .collect()
 }
 
 fn thumbnail_candidate(attachment: &flectar_mail_core::models::AttachmentMeta) -> bool {
@@ -79,29 +91,49 @@ fn thumbnail_candidate(attachment: &flectar_mail_core::models::AttachmentMeta) -
         .split(';')
         .next()
         .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+        .trim();
     attachment.size.is_none_or(|size| size <= 4 * 1024 * 1024)
-        && media.starts_with("image/")
-        && media != "image/svg+xml"
+        && media
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        && !media.eq_ignore_ascii_case("image/svg+xml")
+}
+
+async fn read_preview_bytes(file: tokio::fs::File, max_bytes: usize) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+    let mut reader = file.take(max_bytes as u64);
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let count = reader
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        let required = bytes.len() + count;
+        if required > bytes.capacity() {
+            let target = required
+                .max(bytes.capacity().saturating_mul(2))
+                .min(max_bytes);
+            bytes.reserve_exact(target - bytes.len());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
 }
 fn attachment_rows(
     attachments: &[flectar_mail_core::models::AttachmentMeta],
 ) -> Vec<MailAttachment> {
     attachments
         .iter()
-        .filter(|a| {
-            !a.is_inline
-                || a.filename
-                    .as_ref()
-                    .is_some_and(|name| !name.trim().is_empty())
-        })
+        .filter(|a| visible_attachment(a))
         .map(|a| {
             let name = a
                 .filename
-                .clone()
+                .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "attachment".into());
+                .unwrap_or("attachment");
             let media = a
                 .mime_type
                 .as_deref()
@@ -111,15 +143,19 @@ fn attachment_rows(
                 .unwrap_or("")
                 .trim()
                 .to_ascii_lowercase();
+            let previewable = media == "application/pdf"
+                || media.starts_with("image/")
+                || media.starts_with("text/")
+                || matches!(media.as_str(), "application/json" | "application/xml")
+                || name
+                    .as_bytes()
+                    .get(name.len().saturating_sub(4)..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".pdf"));
             MailAttachment {
                 id: a.id.to_string().into(),
-                name: name.clone().into(),
-                detail: media.clone().into(),
-                previewable: media == "application/pdf"
-                    || media.starts_with("image/")
-                    || media.starts_with("text/")
-                    || matches!(media.as_str(), "application/json" | "application/xml")
-                    || name.to_ascii_lowercase().ends_with(".pdf"),
+                name: name.into(),
+                detail: media.into(),
+                previewable,
                 thumbnail: Default::default(),
                 has_thumbnail: false,
             }
@@ -226,12 +262,11 @@ pub(crate) fn register(
         Arc<flectar_mail_core::Core>,
         Result<(Vec<u8>, u32, u32), String>,
     )>(8);
-    let (thumbnail_job_sender, mut thumbnail_job_receiver) =
-        tokio::sync::mpsc::channel::<(
-            i32,
-            flectar_mail_core::models::AttachmentMeta,
-            Arc<flectar_mail_core::Core>,
-        )>(8);
+    let (thumbnail_job_sender, mut thumbnail_job_receiver) = tokio::sync::mpsc::channel::<(
+        i32,
+        flectar_mail_core::models::AttachmentMeta,
+        Arc<flectar_mail_core::Core>,
+    )>(8);
     let thumbnail_window = weak.clone();
     runtime.handle().spawn(async move {
         while let Some((message, attachment, core)) = thumbnail_job_receiver.recv().await {
@@ -241,15 +276,10 @@ pub(crate) fn register(
                     .get_attachment(attachment_id)
                     .await
                     .map_err(|error| error.to_string())?;
-                use tokio::io::AsyncReadExt;
                 let file = tokio::fs::File::open(path)
                     .await
                     .map_err(|error| error.to_string())?;
-                let mut bytes = Vec::new();
-                file.take(4 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let bytes = read_preview_bytes(file, 4 * 1024 * 1024 + 1).await?;
                 image_thumbnail(bytes).await
             }
             .await;
@@ -260,9 +290,8 @@ pub(crate) fn register(
             {
                 break;
             }
-            let _ = thumbnail_window.upgrade_in_event_loop(|app| {
-                app.global::<MailAttachments>().invoke_deliver()
-            });
+            let _ = thumbnail_window
+                .upgrade_in_event_loop(|app| app.global::<MailAttachments>().invoke_deliver());
         }
     });
     let thumbnail_pending = Rc::new(RefCell::new(HashSet::<(usize, i32, i64)>::new()));
@@ -337,11 +366,12 @@ pub(crate) fn register(
                 continue;
             };
             let rows = app.global::<MailAttachments>().get_rows();
+            let attachment_id = attachment_id.to_string();
             for index in 0..rows.row_count() {
                 let Some(mut row) = rows.row_data(index) else {
                     continue;
                 };
-                if row.id.as_str() != attachment_id.to_string() {
+                if row.id.as_str() != attachment_id {
                     continue;
                 }
                 row.thumbnail = slint::Image::from_rgba8(
@@ -486,15 +516,10 @@ pub(crate) fn register(
                             .await?;
                         return Ok(None);
                     }
-                    use tokio::io::AsyncReadExt;
                     let file = tokio::fs::File::open(path)
                         .await
                         .map_err(|e| e.to_string())?;
-                    let mut bytes = Vec::new();
-                    file.take(16 * 1024 * 1024 + 1)
-                        .read_to_end(&mut bytes)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let bytes = read_preview_bytes(file, 16 * 1024 * 1024 + 1).await?;
                     if bytes.len() > 16 * 1024 * 1024 {
                         return Err(
                             "This attachment is too large to preview. Download it to view locally."
@@ -525,6 +550,43 @@ pub(crate) fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn preview_reads_bound_capacity_and_keep_the_over_limit_sentinel() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("attachment.bin");
+        let source = (0..200_000)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        tokio::fs::write(&path, &source).await.unwrap();
+        for limit in [0, 1, 8191, 8192, 8193, 65_537, 200_001] {
+            let bytes = read_preview_bytes(tokio::fs::File::open(&path).await.unwrap(), limit)
+                .await
+                .unwrap();
+            assert_eq!(bytes, source[..source.len().min(limit)]);
+            assert!(bytes.capacity() <= limit);
+        }
+    }
+    #[test]
+    fn thumbnail_plan_keeps_visible_order_and_four_item_limit() {
+        use flectar_mail_core::models::AttachmentMeta;
+        let files = (0..10)
+            .map(|id| AttachmentMeta {
+                id,
+                filename: (id != 0).then(|| "photo.png".into()),
+                mime_type: Some("image/png".into()),
+                size: Some(42),
+                is_inline: id == 0,
+            })
+            .collect::<Vec<_>>();
+        let mut rows = attachment_rows(&files);
+        rows[0].has_thumbnail = true;
+        let ids = thumbnail_ids(&files, &rows);
+        assert_eq!(
+            ids.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+            ["2", "3", "4", "5"]
+        );
+        assert_eq!(ids[0].as_ptr(), rows[1].id.as_ptr());
+    }
     #[test]
     fn attachment_rows_preserve_large_ids_and_offer_safe_previews() {
         use flectar_mail_core::models::AttachmentMeta;

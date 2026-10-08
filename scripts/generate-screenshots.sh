@@ -64,6 +64,7 @@ render() {
   local show_threads="${8:-false}"
   local show_account_markers="${9:-false}"
   local settings_tab="${10:-}"
+  local calendar_mode="${11:-week}"
   local style="fluent"
   local data_file="$temporary_dir/$output_name.json"
 
@@ -78,6 +79,7 @@ render() {
     --arg workspace_layout "$workspace_layout" \
     --arg theme_preset "$theme_preset" \
     --arg active_view "$active_view" \
+    --arg calendar_mode "$calendar_mode" \
     --arg settings_tab "$settings_tab" \
     --arg favicon_dir "$favicon_dir" \
     --arg demo_email "$demo_email_png" \
@@ -91,6 +93,8 @@ render() {
       | .workspace_layout = $workspace_layout
       | .screenshot_theme_preset = $theme_preset
       | .active_view = $active_view
+      | .calendar_view_mode = $calendar_mode
+      | .calendar_period_title = (if $calendar_mode == "agenda" then .calendar_month_title else .calendar_period_title end)
       | .settings_open = ($settings_tab != "")
       | .settings_tab = (if $settings_tab == "" then (.settings_tab // "General") else $settings_tab end)
       | .text_mode = false
@@ -261,3 +265,10 @@ render_selected desktop-storage-light 1320 800 light default default mail false 
 render_selected desktop-storage-dark 1320 800 dark default default mail false false Data
 render_selected mobile-light 390 844 light
 render_selected mobile-dark 390 844 dark
+
+render_selected desktop-agenda-light 1320 800 light default default calendar false false "" agenda
+render_selected desktop-agenda-dark 1320 800 dark default default calendar false false "" agenda
+render_selected tablet-agenda-light 768 1024 light default default calendar false false "" agenda
+render_selected tablet-agenda-dark 768 1024 dark default default calendar false false "" agenda
+render_selected mobile-agenda-light 390 844 light default default calendar false false "" agenda
+render_selected mobile-agenda-dark 390 844 dark default default calendar false false "" agenda

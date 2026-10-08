@@ -55,9 +55,7 @@ mod tray_ui {
 use account_controller::*;
 #[cfg(test)]
 use calendar::start_of_week;
-use calendar::{
-    LocalCalendarState, apply_calendar, first_of_month, refresh_calendar_events, shift_month,
-};
+use calendar::{LocalCalendarState, apply_calendar, first_of_month, refresh_calendar_events};
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone};
 use compose_controller::*;
 use compose_editor::{ComposeEditorStyle, LazyComposeEditor, RenderedComposeEditor};
@@ -70,20 +68,22 @@ use favicon::{
     physical_pixel_side,
 };
 use flectar_mail_core::config::Paths;
+#[cfg(test)]
+use flectar_mail_core::models::ThreadCursor;
 use flectar_mail_core::models::{
     Account, AccountConfig, AddPasswordAccountArgs, CalendarConnection, CardDavConnection,
     ContactRecord, ContactRecordCursor, ContactRecordPage, CreateEventArgs, DraftAttachmentIn,
     Label, MailProfile, MailProtocol, Provider, Settings, Snippet, UpdateEventArgs,
 };
 #[cfg(test)]
-use flectar_mail_core::models::ThreadCursor;
-#[cfg(test)]
 use mail::fixture_messages;
 use mail::{
     ComposeMessage, ComposeSource, CoreMailSource, MailCursor, MailMessage, MailboxEntry,
     display_preview,
 };
-use mail_groups::{MailGroupState, mail_group_key, mail_list_entry_key, project_mail_list, same_mail_list_entry};
+use mail_groups::{
+    MailGroupState, mail_group_key, mail_list_entry_key, project_mail_list, same_mail_list_entry,
+};
 use mail_render_projection::*;
 use mail_view_model::*;
 use renderer::{GpuEmailRenderer, RenderedEmail};
@@ -95,8 +95,8 @@ use slint::{DataTransfer, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, 
 use startup::{
     PendingCoreUpdates, StartupCalendarSnapshot, StartupSnapshot, StartupUpdate,
     WarmStartCacheWriter, WarmStartProjection, WarmStartSnapshot, apply_settings,
-    load_startup_calendar_snapshot, load_startup_mail_metadata, load_startup_snapshot,
-    load_warm_start_snapshot, spawn_core_event_listener,
+    apply_warm_start_snapshot, load_startup_calendar_snapshot, load_startup_mail_metadata,
+    load_startup_snapshot, load_warm_start_snapshot, spawn_core_event_listener,
 };
 use startup_metrics::StartupMetrics;
 use std::{
@@ -374,10 +374,7 @@ struct MailListUpdate {
 
 enum MailListUpdateKind {
     Refresh,
-    Pagination {
-        cursor: MailCursor,
-        generation: u64,
-    },
+    Pagination { cursor: MailCursor, generation: u64 },
 }
 
 struct MailMetadataUpdate {
@@ -2242,6 +2239,8 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     // The calendar is always backed by the standalone local calendar store.
     // Provider sync enriches the same store but is never required to use it.
     let calendar_today = Local::now().date_naive();
+    app.global::<CalendarAgendaNavigation>()
+        .on_index(calendar::agenda_row_index);
     let calendar_state = Rc::new(RefCell::new(LocalCalendarState::new(calendar_today)));
     app.set_calendar_sources(Rc::clone(&calendar_state.borrow().source_rows).into());
     let calendar_editing_event_id = Rc::new(Cell::new(None::<i64>));
@@ -2256,15 +2255,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
         };
         let today = Local::now().date_naive();
         let mut calendar = calendar_for_navigation.borrow_mut();
-        if scope.as_str() == "month" {
-            calendar.visible_month = shift_month(calendar.visible_month, direction);
-        } else if calendar.view_mode == "month" {
-            calendar.visible_month = shift_month(calendar.visible_month, direction);
-            calendar.selected_date = calendar.visible_month;
-        } else {
-            calendar.selected_date += ChronoDuration::days(direction as i64 * 7);
-            calendar.visible_month = first_of_month(calendar.selected_date);
-        }
+        calendar.navigate(scope.as_str(), direction);
         if let Some(core) = inbox_for_calendar_navigation.borrow().core.clone()
             && let Err(error) = refresh_calendar_events(
                 &core,
@@ -2276,6 +2267,9 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
             app.set_sync_status(UiMessage::detail("Could not load calendar: {}", error));
         }
         apply_calendar(&app, &calendar, today);
+        app.set_calendar_agenda_scroll_request(
+            app.get_calendar_agenda_scroll_request().wrapping_add(1),
+        );
     });
 
     let app_weak = app.as_weak();
@@ -2293,15 +2287,20 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
         let mut calendar = calendar_for_selection.borrow_mut();
         calendar.selected_date = date;
         calendar.visible_month = first_of_month(date);
-        if let Some(core) = inbox_for_calendar_selection.borrow().core.clone() {
-            let _ = refresh_calendar_events(
+        if let Some(core) = inbox_for_calendar_selection.borrow().core.clone()
+            && let Err(error) = refresh_calendar_events(
                 &core,
                 &runtime_for_selection,
                 &mut calendar,
                 &inbox_for_calendar_selection.borrow().connected_accounts,
-            );
+            )
+        {
+            app.set_sync_status(UiMessage::detail("Could not load calendar: {}", error));
         }
         apply_calendar(&app, &calendar, today);
+        app.set_calendar_agenda_scroll_request(
+            app.get_calendar_agenda_scroll_request().wrapping_add(1),
+        );
     });
 
     let app_weak = app.as_weak();
@@ -2312,24 +2311,58 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
         let Some(app) = app_weak.upgrade() else {
             return;
         };
-        let view = if view.as_str() == "month" {
-            "month"
-        } else {
-            "week"
-        };
         let today = Local::now().date_naive();
         let mut calendar = calendar_for_view.borrow_mut();
-        calendar.view_mode = view.to_owned();
-        calendar.visible_month = first_of_month(calendar.selected_date);
-        if let Some(core) = inbox_for_calendar_view.borrow().core.clone() {
-            let _ = refresh_calendar_events(
+        calendar.set_view(view.as_str());
+        if let Some(core) = inbox_for_calendar_view.borrow().core.clone()
+            && let Err(error) = refresh_calendar_events(
                 &core,
                 &runtime_for_view,
                 &mut calendar,
                 &inbox_for_calendar_view.borrow().connected_accounts,
-            );
+            )
+        {
+            app.set_sync_status(UiMessage::detail("Could not load calendar: {}", error));
         }
         apply_calendar(&app, &calendar, today);
+        app.set_calendar_agenda_scroll_request(
+            app.get_calendar_agenda_scroll_request().wrapping_add(1),
+        );
+    });
+
+    let app_weak = app.as_weak();
+    let calendar_for_filter = Rc::clone(&calendar_state);
+    app.on_calendar_toggle_agenda_filter(move |id, checked| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut calendar = calendar_for_filter.borrow_mut();
+        if checked {
+            calendar.agenda_hidden.remove(&i64::from(id));
+        } else {
+            calendar.agenda_hidden.insert(i64::from(id));
+        }
+        calendar::apply_agenda(
+            &app,
+            &calendar,
+            Local::now().date_naive(),
+            Local::now().time(),
+        );
+    });
+    let app_weak = app.as_weak();
+    let calendar_for_clear_filter = Rc::clone(&calendar_state);
+    app.on_calendar_clear_agenda_filters(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut calendar = calendar_for_clear_filter.borrow_mut();
+        calendar.agenda_hidden.clear();
+        calendar::apply_agenda(
+            &app,
+            &calendar,
+            Local::now().date_naive(),
+            Local::now().time(),
+        );
     });
 
     let app_weak = app.as_weak();
@@ -2380,15 +2413,20 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
         let mut calendar = calendar_for_today.borrow_mut();
         calendar.selected_date = today;
         calendar.visible_month = first_of_month(today);
-        if let Some(core) = inbox_for_calendar_today.borrow().core.clone() {
-            let _ = refresh_calendar_events(
+        if let Some(core) = inbox_for_calendar_today.borrow().core.clone()
+            && let Err(error) = refresh_calendar_events(
                 &core,
                 &runtime_for_today,
                 &mut calendar,
                 &inbox_for_calendar_today.borrow().connected_accounts,
-            );
+            )
+        {
+            app.set_sync_status(UiMessage::detail("Could not load calendar: {}", error));
         }
         apply_calendar(&app, &calendar, today);
+        app.set_calendar_agenda_scroll_request(
+            app.get_calendar_agenda_scroll_request().wrapping_add(1),
+        );
     });
 
     let app_weak = app.as_weak();
@@ -3576,40 +3614,12 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                 StartupUpdate::Warm { snapshot, applied } => {
                     let snapshot = *snapshot;
                     let saved_at_ms = snapshot.saved_at_ms;
-                    {
-                        let mut state = startup_state.borrow_mut();
-                        // Core is deliberately left unset. The global startup
-                        // guard keeps callbacks inert while this saved view is
-                        // visible behind it.
-                        state.using_core = true;
-                        state.scope = snapshot.scope;
-                        state.inbox_count = snapshot.inbox_count;
-                        state.next_cursor = snapshot.next_cursor.map(MailCursor::Thread);
-                        state.connected_accounts = snapshot.accounts;
-                        state.messages = snapshot
-                            .messages
-                            .into_iter()
-                            .map(MailMessage::from)
-                            .collect();
-                        state.mailboxes = snapshot
-                            .mailboxes
-                            .into_iter()
-                            .map(MailboxEntry::from)
-                            .collect();
-                        state.unified_mailboxes = snapshot
-                            .unified_mailboxes
-                            .into_iter()
-                            .map(MailboxEntry::from)
-                            .collect();
-                        state.preview_closed = true;
-                    }
-                    refresh_rows_only(&app, &startup_state, &startup_runtime);
-                    refresh_list_metadata(&app, &startup_state);
-                    app.set_startup_hydrated(true);
+                    apply_warm_start_snapshot(&app, &startup_state, &startup_runtime, snapshot);
                     startup_metrics_for_ui.emit_once(
                         "warm_cache_applied",
                         serde_json::json!({
                             "saved_at_ms": saved_at_ms,
+                            "accounts": app.get_connected_accounts().row_count(),
                             "rows": startup_state.borrow().messages.len(),
                         }),
                     );
@@ -3969,7 +3979,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
         platform.credentials.clone(),
         platform.oauth_redirects.clone(),
         startup_tx,
-        startup_metrics,
+        startup_metrics.clone(),
     );
 
     render_current(&app, &state, &runtime)?;
@@ -4846,9 +4856,14 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
             };
             state.core.clone().map(|core| (core, account_id))
         };
-        let Some((core, account_id)) = request else { return; };
-        if let Err(error) = mail_work::enqueue(&state_for_empty_trash, core,
-            vec![(-1, 0, mail_work::Operation::EmptyTrash(account_id))]) {
+        let Some((core, account_id)) = request else {
+            return;
+        };
+        if let Err(error) = mail_work::enqueue(
+            &state_for_empty_trash,
+            core,
+            vec![(-1, 0, mail_work::Operation::EmptyTrash(account_id))],
+        ) {
             app.set_render_status(UiMessage::detail("Message action failed: {}", error));
         }
     });
@@ -7060,6 +7075,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     let date_refresh_state = Rc::clone(&state);
     let date_refresh_runtime = Rc::clone(&runtime);
     let date_refresh_app = app.as_weak();
+    let date_refresh_calendar = Rc::clone(&calendar_state);
     let last_local_date = Cell::new(Local::now().date_naive());
     let date_refresh_timer = Timer::default();
     date_refresh_timer.start(
@@ -7071,6 +7087,18 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                 && let Some(app) = date_refresh_app.upgrade()
             {
                 refresh_rows_only(&app, &date_refresh_state, &date_refresh_runtime);
+                apply_calendar(&app, &date_refresh_calendar.borrow(), today);
+            } else if let Some(app) = date_refresh_app.upgrade()
+                && app.get_active_view() == "calendar"
+                && app.get_calendar_view_mode() == "agenda"
+                && !app.get_render_suspended()
+            {
+                calendar::apply_agenda(
+                    &app,
+                    &date_refresh_calendar.borrow(),
+                    today,
+                    Local::now().time(),
+                );
             }
         },
     );
@@ -7124,6 +7152,7 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     // tray participates in the same process-wide event loop. This is Slint's
     // documented multi-component pattern; calling AppWindow::run() here would
     // redundantly show the main window a second time.
+    startup_metrics.emit("event_loop_entered", serde_json::Value::Null);
     let event_loop_result = if benchmark_tray {
         slint::run_event_loop_until_quit()
     } else {
@@ -7179,11 +7208,11 @@ mod calendar_tests {
     fn month_navigation_crosses_year_boundaries() {
         let december = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
         assert_eq!(
-            shift_month(december, 1),
+            calendar::shift_month(december, 1),
             NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
         );
         assert_eq!(
-            shift_month(december, -12),
+            calendar::shift_month(december, -12),
             NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()
         );
     }
