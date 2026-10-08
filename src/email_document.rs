@@ -300,17 +300,29 @@ fn readable_fallback(text: &str) -> String {
 }
 
 fn is_remote(value: &str) -> bool {
-    let value = value.trim().to_ascii_lowercase();
-    value.starts_with("https:") || value.starts_with("http:") || value.starts_with("//")
+    let value = value.trim().as_bytes();
+    value
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https:"))
+        || value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http:"))
+        || value.starts_with(b"//")
 }
 fn css_remote(css: &str) -> bool {
-    let css = css.to_ascii_lowercase();
     // CSS escapes are conservatively counted as remote when a URL is present.
-    css.contains("url(")
-        && (css.contains("http:")
-            || css.contains("https:")
+    contains_ascii_case_insensitive(css, b"url(")
+        && (contains_ascii_case_insensitive(css, b"http:")
+            || contains_ascii_case_insensitive(css, b"https:")
             || css.contains("//")
             || css.contains('\\'))
+}
+
+fn contains_ascii_case_insensitive(value: &str, needle: &[u8]) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 pub fn has_remote_images(html: &str) -> bool {
     scan(
@@ -375,6 +387,43 @@ pub fn export_html(html: &str, print: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_checks_preserve_ascii_case_and_unicode_edges() {
+        for value in [
+            " HtTpS://test.dev/a ",
+            "HTTP:x",
+            "//test.dev",
+            "éHTTPS:x",
+            "https",
+            "cid:x",
+            "",
+        ] {
+            let old = value.trim().to_ascii_lowercase();
+            assert_eq!(
+                is_remote(value),
+                old.starts_with("https:") || old.starts_with("http:") || old.starts_with("//")
+            );
+        }
+        for value in [
+            "éURL(HTTPS:x)",
+            "URL(\\68ttp:x)",
+            "url(cid:x)",
+            "Url(//test.dev)",
+            "url(x) HTTP:y",
+            "url",
+            "",
+        ] {
+            let old = value.to_ascii_lowercase();
+            assert_eq!(
+                css_remote(value),
+                old.contains("url(")
+                    && (old.contains("http:")
+                        || old.contains("https:")
+                        || old.contains("//")
+                        || old.contains('\\'))
+            );
+        }
+    }
     #[test]
     fn escaping_reserves_only_the_final_unicode_output() {
         let text = "<&\"é👩‍🚀>".repeat(10_000);
