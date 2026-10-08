@@ -190,7 +190,6 @@ pub fn save_with_descendants(
                 && label.id != previous.id
                 && label.name.starts_with(&prefix)
         })
-        .cloned()
         .collect::<Vec<_>>();
     let subtree_ids = std::iter::once(previous.id)
         .chain(descendants.iter().map(|label| label.id))
