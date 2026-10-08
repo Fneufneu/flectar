@@ -221,7 +221,7 @@ fn css_tokens_excessive(parser: &mut cssparser::Parser<'_, '_>, depth: usize) ->
     if depth > 64 {
         return true;
     }
-    while let Ok(token) = parser.next().cloned() {
+    while let Ok(token) = parser.next() {
         match token {
             // Bound numeric magnitude, not decimal precision or digits in URLs,
             // selectors, comments, strings, and colors. Marketing generators
@@ -236,10 +236,10 @@ fn css_tokens_excessive(parser: &mut cssparser::Parser<'_, '_>, depth: usize) ->
             {
                 return true;
             }
-            CssToken::Function(ref name) if name.eq_ignore_ascii_case("url") => {
+            CssToken::Function(name) if name.eq_ignore_ascii_case("url") => {
                 // Contents are resource identifiers, not layout expressions.
             }
-            CssToken::Function(ref name) => {
+            CssToken::Function(name) => {
                 let repeat = name.eq_ignore_ascii_case("repeat");
                 let mut excessive = false;
                 let _: Result<(), cssparser::ParseError<'_, ()>> =
