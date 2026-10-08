@@ -153,18 +153,33 @@ fn contact_last_interacted(app: &AppWindow, value: Option<i64>) -> String {
 }
 
 fn contact_matches(contact: &ContactRecord, query: &str) -> bool {
-    let haystack = format!(
-        "{} {} {} {} {} {} {} {}",
-        contact.name,
-        contact.email,
-        contact.phone,
-        contact.company,
-        contact.job_title,
-        contact.website,
-        contact.tags,
-        contact.postal_address,
-    )
-    .to_lowercase();
+    if query.split_whitespace().next().is_none() {
+        return true;
+    }
+    let fields = [
+        contact.name.as_str(),
+        contact.email.as_str(),
+        contact.phone.as_str(),
+        contact.company.as_str(),
+        contact.job_title.as_str(),
+        contact.website.as_str(),
+        contact.tags.as_str(),
+        contact.postal_address.as_str(),
+    ];
+    let mut haystack = String::with_capacity(
+        fields.iter().map(|field| field.len()).sum::<usize>() + fields.len() - 1,
+    );
+    for (index, field) in fields.into_iter().enumerate() {
+        if index > 0 {
+            haystack.push(' ');
+        }
+        haystack.push_str(field);
+    }
+    if haystack.is_ascii() {
+        haystack.make_ascii_lowercase();
+    } else {
+        haystack = haystack.to_lowercase();
+    }
     query
         .to_lowercase()
         .split_whitespace()
