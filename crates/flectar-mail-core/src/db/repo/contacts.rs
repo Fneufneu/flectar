@@ -232,7 +232,10 @@ pub fn backfill_folded(conn: &Connection) -> Result<()> {
 /// Build the WHERE fragment requiring every folded query token to appear in
 /// `contacts.folded`, pushing one `%tok%` bind per token. Returns None for
 /// queries with no usable tokens.
-fn folded_clauses(query: &str, bind: &mut Vec<Box<dyn rusqlite::types::ToSql>>) -> Option<String> {
+fn folded_clauses<'a>(
+    query: &str,
+    bind: &mut Vec<Box<dyn rusqlite::types::ToSql + 'a>>,
+) -> Option<String> {
     use std::fmt::Write;
     let folded = fold(query);
     let mut clauses = String::new();
@@ -267,12 +270,12 @@ fn folded_clauses(query: &str, bind: &mut Vec<Box<dyn rusqlite::types::ToSql>>) 
     (!clauses.is_empty()).then_some(clauses)
 }
 
-fn record_where_clause(
+fn record_where_clause<'a>(
     query: &str,
     account_id: Option<i64>,
     favorites_only: bool,
     suggestions_only: bool,
-    bind: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+    bind: &mut Vec<Box<dyn rusqlite::types::ToSql + 'a>>,
 ) -> String {
     let mut clauses = Vec::new();
     if let Some(query_clause) = folded_clauses(query, bind) {
@@ -366,15 +369,17 @@ pub fn suggest(
         )
     };
     let mut stmt = conn.prepare(&sql)?;
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
-        .query_map(params_ref.as_slice(), |r| {
-            Ok(ContactSuggestion {
-                name: r.get(0)?,
-                email: r.get(1)?,
-                interactions: r.get(2)?,
-            })
-        })?
+        .query_map(
+            rusqlite::params_from_iter(bind.iter().map(|value| value.as_ref())),
+            |r| {
+                Ok(ContactSuggestion {
+                    name: r.get(0)?,
+                    email: r.get(1)?,
+                    interactions: r.get(2)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -421,10 +426,12 @@ pub fn list_records(conn: &Connection, query: &str, limit: i64) -> Result<Vec<Co
          LIMIT ?{}",
         bind.len()
     );
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     Ok(stmt
-        .query_map(params_ref.as_slice(), record_from_row)?
+        .query_map(
+            rusqlite::params_from_iter(bind.iter().map(|value| value.as_ref())),
+            record_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -442,7 +449,7 @@ pub fn list_record_page(
 ) -> Result<ContactRecordPage> {
     let limit = limit.clamp(1, 100);
 
-    let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut bind: Vec<Box<dyn rusqlite::types::ToSql + '_>> = Vec::new();
     let mut where_sql = record_where_clause(
         query,
         account_id,
@@ -453,9 +460,9 @@ pub fn list_record_page(
     if let Some(cursor) = cursor {
         bind.push(Box::new(i64::from(cursor.is_favorite)));
         let favorite_index = bind.len();
-        bind.push(Box::new(cursor.sort_name.clone()));
+        bind.push(Box::new(cursor.sort_name.as_str()));
         let name_index = bind.len();
-        bind.push(Box::new(cursor.email.clone()));
+        bind.push(Box::new(cursor.email.as_str()));
         let email_index = bind.len();
         bind.push(Box::new(cursor.id));
         let id_index = bind.len();
@@ -493,13 +500,12 @@ pub fn list_record_page(
                   id ASC
          LIMIT ?{limit_index}"
     );
-    let params_ref = bind
-        .iter()
-        .map(|value| value.as_ref())
-        .collect::<Vec<&dyn rusqlite::types::ToSql>>();
     let mut stmt = conn.prepare(&sql)?;
     let mut records = stmt
-        .query_map(params_ref.as_slice(), record_from_row)?
+        .query_map(
+            rusqlite::params_from_iter(bind.iter().map(|value| value.as_ref())),
+            record_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let has_more = records.len() > limit as usize;
     if has_more {
