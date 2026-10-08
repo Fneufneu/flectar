@@ -41,13 +41,13 @@ fn append_escaped(output: &mut String, text: &str) {
 
 #[derive(Default)]
 struct Scan {
-    stack: Vec<String>,
+    stack: Vec<html5ever::LocalName>,
     count: usize,
     excessive: bool,
     text: String,
     remote: bool,
     export: String,
-    raw: Option<String>,
+    raw: Option<html5ever::LocalName>,
     emit_export: bool,
     truncated: bool,
 }
@@ -69,21 +69,21 @@ impl TokenSink for Sink {
         let mut s = self.0.borrow_mut();
         match token {
             Token::TagToken(tag) => {
-                let name = tag.name.to_string();
+                let name = tag.name;
                 if tag.kind == TagKind::EndTag {
                     if let Some(index) = s.stack.iter().rposition(|n| n == &name) {
                         s.stack.truncate(index);
                     }
-                    if matches!(name.as_str(), "script" | "style" | "title") {
+                    if matches!(name.as_ref(), "script" | "style" | "title") {
                         s.raw = None;
                     }
                     if s.emit_export
-                        && !matches!(name.as_str(), "meta" | "base" | "link" | "script")
+                        && !matches!(name.as_ref(), "meta" | "base" | "link" | "script")
                     {
                         s.export.push_str(&format!("</{name}>"));
                     }
                     if matches!(
-                        name.as_str(),
+                        name.as_ref(),
                         "p" | "div" | "tr" | "li" | "pre" | "h1" | "h2" | "h3"
                     ) {
                         s.append_text("\n");
@@ -91,7 +91,7 @@ impl TokenSink for Sink {
                 } else {
                     s.count += 1;
                     if !matches!(
-                        name.as_str(),
+                        name.as_ref(),
                         "area"
                             | "base"
                             | "br"
@@ -125,14 +125,16 @@ impl TokenSink for Sink {
                         {
                             s.excessive = true;
                         }
-                        if (name == "img" && attr.name.local.as_ref() == "src" && is_remote(value))
+                        if (name.as_ref() == "img"
+                            && attr.name.local.as_ref() == "src"
+                            && is_remote(value))
                             || (attr.name.local.as_ref() == "style" && css_remote(value))
                         {
                             s.remote = true;
                         }
                     }
                     if s.emit_export
-                        && !matches!(name.as_str(), "meta" | "base" | "link" | "script")
+                        && !matches!(name.as_ref(), "meta" | "base" | "link" | "script")
                     {
                         s.export.push('<');
                         s.export.push_str(&name);
@@ -145,17 +147,17 @@ impl TokenSink for Sink {
                         }
                         s.export.push('>');
                     }
-                    if name == "br" {
+                    if name.as_ref() == "br" {
                         s.append_text("\n");
                     }
-                    if name == "img"
+                    if name.as_ref() == "img"
                         && let Some(alt) = tag.attrs.iter().find(|a| a.name.local.as_ref() == "alt")
                     {
                         s.append_text(&alt.value);
                     }
-                    if matches!(name.as_str(), "script" | "style" | "title") {
+                    if matches!(name.as_ref(), "script" | "style" | "title") {
                         s.raw = Some(name.clone());
-                        return TokenSinkResult::RawData(if name == "title" {
+                        return TokenSinkResult::RawData(if name.as_ref() == "title" {
                             html5ever::tokenizer::states::RawKind::Rcdata
                         } else {
                             html5ever::tokenizer::states::RawKind::Rawtext
