@@ -295,7 +295,8 @@ fn readable_fallback(text: &str) -> String {
             blank = false;
         }
     }
-    result.trim_end().to_owned()
+    result.truncate(result.trim_end().len());
+    result
 }
 
 fn is_remote(value: &str) -> bool {
