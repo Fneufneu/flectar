@@ -98,6 +98,30 @@ fn thumbnail_candidate(attachment: &flectar_mail_core::models::AttachmentMeta) -
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
         && !media.eq_ignore_ascii_case("image/svg+xml")
 }
+
+async fn read_preview_bytes(file: tokio::fs::File, max_bytes: usize) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+    let mut reader = file.take(max_bytes as u64);
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let count = reader
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        let required = bytes.len() + count;
+        if required > bytes.capacity() {
+            let target = required
+                .max(bytes.capacity().saturating_mul(2))
+                .min(max_bytes);
+            bytes.reserve_exact(target - bytes.len());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
 fn attachment_rows(
     attachments: &[flectar_mail_core::models::AttachmentMeta],
 ) -> Vec<MailAttachment> {
@@ -252,15 +276,10 @@ pub(crate) fn register(
                     .get_attachment(attachment_id)
                     .await
                     .map_err(|error| error.to_string())?;
-                use tokio::io::AsyncReadExt;
                 let file = tokio::fs::File::open(path)
                     .await
                     .map_err(|error| error.to_string())?;
-                let mut bytes = Vec::new();
-                file.take(4 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let bytes = read_preview_bytes(file, 4 * 1024 * 1024 + 1).await?;
                 image_thumbnail(bytes).await
             }
             .await;
@@ -497,15 +516,10 @@ pub(crate) fn register(
                             .await?;
                         return Ok(None);
                     }
-                    use tokio::io::AsyncReadExt;
                     let file = tokio::fs::File::open(path)
                         .await
                         .map_err(|e| e.to_string())?;
-                    let mut bytes = Vec::new();
-                    file.take(16 * 1024 * 1024 + 1)
-                        .read_to_end(&mut bytes)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let bytes = read_preview_bytes(file, 16 * 1024 * 1024 + 1).await?;
                     if bytes.len() > 16 * 1024 * 1024 {
                         return Err(
                             "This attachment is too large to preview. Download it to view locally."
@@ -536,6 +550,22 @@ pub(crate) fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn preview_reads_bound_capacity_and_keep_the_over_limit_sentinel() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("attachment.bin");
+        let source = (0..200_000)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        tokio::fs::write(&path, &source).await.unwrap();
+        for limit in [0, 1, 8191, 8192, 8193, 65_537, 200_001] {
+            let bytes = read_preview_bytes(tokio::fs::File::open(&path).await.unwrap(), limit)
+                .await
+                .unwrap();
+            assert_eq!(bytes, source[..source.len().min(limit)]);
+            assert!(bytes.capacity() <= limit);
+        }
+    }
     #[test]
     fn thumbnail_plan_keeps_visible_order_and_four_item_limit() {
         use flectar_mail_core::models::AttachmentMeta;
