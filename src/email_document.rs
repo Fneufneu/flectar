@@ -49,10 +49,14 @@ struct Scan {
     export: String,
     raw: Option<html5ever::LocalName>,
     emit_export: bool,
+    collect_text: bool,
     truncated: bool,
 }
 impl Scan {
     fn append_text(&mut self, text: &str) {
+        if !self.collect_text {
+            return;
+        }
         let remaining = MAX_TEXT_BYTES.saturating_sub(self.text.len());
         let end = text.floor_char_boundary(remaining.min(text.len()));
         self.text.push_str(&text[..end]);
@@ -191,9 +195,10 @@ impl TokenSink for Sink {
         TokenSinkResult::Continue
     }
 }
-fn scan(html: &str, emit_export: bool) -> Scan {
+fn scan(html: &str, emit_export: bool, collect_text: bool) -> Scan {
     let sink = Sink(RefCell::new(Scan {
         emit_export,
+        collect_text,
         ..Default::default()
     }));
     let tokenizer = Tokenizer::new(sink, Default::default());
@@ -310,6 +315,7 @@ pub fn has_remote_images(html: &str) -> bool {
     scan(
         &html[..html.floor_char_boundary(html.len().min(MAX_HTML_BYTES))],
         false,
+        false,
     )
     .remote
 }
@@ -317,7 +323,7 @@ pub fn bounded_html(html: &str) -> (String, Option<String>) {
     if html.len() > MAX_HTML_BYTES {
         return ("<p>This message is too large to render. Use the original source or plain text view.</p>".into(), Some("Message exceeds the HTML size limit.".into()));
     }
-    let s = scan(html, false);
+    let s = scan(html, false, true);
     if s.excessive {
         return (
             format!(
@@ -334,6 +340,7 @@ pub fn fallback(html: &str) -> String {
         &scan(
             &html[..html.floor_char_boundary(html.len().min(MAX_HTML_BYTES))],
             false,
+            true,
         )
         .text,
     )
@@ -342,7 +349,7 @@ pub fn fallback(html: &str) -> String {
 pub fn export_html(html: &str, print: bool) -> String {
     // Exports never fetch live remote content. Embedded MIME resources remain
     // available; explicit clicked links still open normally in the browser.
-    let clean = scan(html, true).export;
+    let clean = scan(html, true, false).export;
     const PRINT: &str = "window.addEventListener('load',()=>window.print())";
     use base64::Engine;
     use sha2::{Digest, Sha256};
@@ -373,6 +380,20 @@ mod tests {
         let escaped = escape(&text);
         assert_eq!(escaped, "&lt;&amp;&quot;é👩‍🚀&gt;".repeat(10_000));
         assert_eq!(escaped.capacity(), escaped.len());
+    }
+    #[test]
+    fn remote_and_export_scans_do_not_retain_recovery_text() {
+        let html = format!(
+            "<p>{}</p><img src='https://example.test/a'>",
+            "é".repeat(500_000)
+        );
+        let remote = scan(&html, false, false);
+        assert!(remote.remote);
+        assert_eq!(remote.text.capacity(), 0);
+        let export = scan(&html, true, false);
+        assert!(export.export.contains("é"));
+        assert_eq!(export.text.capacity(), 0);
+        assert_eq!(scan(&html, false, true).text.len(), MAX_TEXT_BYTES);
     }
     #[test]
     fn generated_css_precision_and_identifiers_are_not_complexity() {
@@ -444,7 +465,7 @@ mod tests {
         ));
         assert!(!has_remote_images("<a href='https://example.com'>link</a>"));
         let huge = "é".repeat(MAX_TEXT_BYTES);
-        let result = scan(&huge, false);
+        let result = scan(&huge, false, true);
         assert!(result.truncated);
         assert!(result.text.len() <= MAX_TEXT_BYTES);
         assert!(bounded_html(&huge).1.unwrap().contains("display limit"));
