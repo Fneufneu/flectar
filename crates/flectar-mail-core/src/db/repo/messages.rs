@@ -135,13 +135,14 @@ pub fn jmap_adoption_candidate(
            AND ABS(COALESCE(internal_date,date)-?5) <= 300000
          ORDER BY id LIMIT 2"
     ))?;
-    let rows = stmt
-        .query_map(
-            params![account_id, message_id, subject, size, received_at_ms],
-            row_basic,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok((rows.len() == 1).then(|| rows[0].clone()))
+    let mut rows = stmt.query_map(
+        params![account_id, message_id, subject, size, received_at_ms],
+        row_basic,
+    )?;
+    let candidate = rows.next().transpose()?;
+    // Decode the second row too, preserving errors and rejecting ambiguity.
+    let ambiguous = rows.next().transpose()?.is_some();
+    Ok(if ambiguous { None } else { candidate })
 }
 
 /// Stable Gmail API resource lookup. Unlike an RFC Message-ID this is always
