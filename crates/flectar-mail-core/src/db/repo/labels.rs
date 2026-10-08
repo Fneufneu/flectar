@@ -33,7 +33,14 @@ pub fn keyword_for(name: &str) -> String {
             c => c,
         })
         .collect();
-    out = out.trim_matches('_').to_string();
+    out.truncate(out.trim_end_matches('_').len());
+    let start = out.len() - out.trim_start_matches('_').len();
+    if start > 0 {
+        out.drain(..start);
+    }
+    if out.capacity() > out.len().saturating_mul(2).max(64) {
+        out.shrink_to_fit();
+    }
     if out.is_empty() {
         "Label".to_string()
     } else {
@@ -360,6 +367,14 @@ pub fn reconcile_keywords(conn: &Connection, message_id: i64, keywords: &[String
 mod tests {
     use super::*;
     use crate::db::testutil;
+
+    #[test]
+    fn short_keywords_do_not_retain_discarded_padding() {
+        let name = format!("{}é{}", "_".repeat(100_000), "_".repeat(100_000));
+        let keyword = keyword_for(&name);
+        assert_eq!(keyword, "é");
+        assert_eq!(keyword.capacity(), "é".len());
+    }
 
     #[test]
     fn keyword_for_strips_forbidden_atom_chars() {
