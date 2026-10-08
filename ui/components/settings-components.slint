@@ -171,7 +171,8 @@ export component SettingsSelectRow inherits Rectangle {
     in property <color> description-color;
     callback selected(int, string);
 
-    height: root.compact ? 70px + root.compact-description-height : 58px;
+    // Two 8px insets, the 20px title, two 7px gaps and the 36px selector.
+    height: root.compact ? 86px + root.compact-description-height : 58px;
     vertical-stretch: 0;
 
     if !root.compact : HorizontalBox {
@@ -202,6 +203,7 @@ export component SettingsSelectRow inherits Rectangle {
     }
 
     if root.compact : VerticalBox {
+        padding: 8px;
         spacing: 7px;
         Text {
             height: 20px;
@@ -218,7 +220,7 @@ export component SettingsSelectRow inherits Rectangle {
             wrap: word-wrap;
         }
         SettingsSelect {
-            width: parent.width;
+            horizontal-stretch: 1;
             choices: root.choices;
             selected-index <=> root.selected-index;
             selection-changed(index, value) => { root.selected(index, value); }
