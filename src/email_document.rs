@@ -80,7 +80,9 @@ impl TokenSink for Sink {
                     if s.emit_export
                         && !matches!(name.as_ref(), "meta" | "base" | "link" | "script")
                     {
-                        s.export.push_str(&format!("</{name}>"));
+                        s.export.push_str("</");
+                        s.export.push_str(&name);
+                        s.export.push('>');
                     }
                     if matches!(
                         name.as_ref(),
@@ -141,8 +143,11 @@ impl TokenSink for Sink {
                         for attr in &tag.attrs {
                             let n = attr.name.local.as_ref();
                             if !n.starts_with("on") && n != "srcdoc" {
-                                s.export
-                                    .push_str(&format!(" {n}=\"{}\"", escape(&attr.value)));
+                                s.export.push(' ');
+                                s.export.push_str(n);
+                                s.export.push_str("=\"");
+                                append_escaped(&mut s.export, &attr.value);
+                                s.export.push('"');
                             }
                         }
                         s.export.push('>');
@@ -174,7 +179,7 @@ impl TokenSink for Sink {
                     }
                 } else if s.raw.as_deref() != Some("script") {
                     if s.emit_export {
-                        s.export.push_str(&escape(&text));
+                        append_escaped(&mut s.export, &text);
                     }
                     if s.raw.is_none() {
                         s.append_text(&text);
