@@ -8,6 +8,8 @@ import { HorizontalBox, ListView, ScrollView, VerticalBox } from "std-widgets.sl
 import { TypeScale } from "../typography.slint";
 import { LayoutMetrics } from "../design-system.slint";
 import { CollapsibleWorkspaceSidebar, CompactPageHeader, WorkspaceMiniHeading } from "workspace-layout.slint";
+import { CalendarAgenda, CalendarAgendaFilter } from "calendar-agenda.slint";
+import { CalendarAgendaRow, CalendarAgendaFilterRow } from "../models.slint";
 import { ScrollFade } from "scroll-fade.slint";
 
 export component CalendarEvent inherits Rectangle {
@@ -364,6 +366,13 @@ export component FunctionalCalendarView inherits Rectangle {
     in property <[CalendarDay]> month-days: [];
     in property <[CalendarWeekDay]> week-days: [];
     in property <[CalendarEventRow]> events: [];
+    in property <[CalendarAgendaRow]> agenda-rows: [];
+    in property <[CalendarAgendaFilterRow]> agenda-filters: [];
+    in property <int> agenda-filter-count: 0;
+    in property <int> agenda-event-count: 0;
+    in property <float> agenda-anchor: 0;
+    in property <int> agenda-scroll-request: 0;
+    in property <string> timezone;
     in property <[CalendarSourceRow]> sources: [];
     in property <string> month-title;
     in property <string> period-title;
@@ -391,6 +400,8 @@ export component FunctionalCalendarView inherits Rectangle {
     callback new-event;
     callback open-link(string);
     callback set-source-enabled(int, bool);
+    callback toggle-agenda-filter(int, bool);
+    callback clear-agenda-filters;
     callback edit-event(int);
     callback delete-event(int);
 
@@ -530,7 +541,7 @@ export component FunctionalCalendarView inherits Rectangle {
                     clicked => { root.sidebar-collapsed = !root.sidebar-collapsed; }
                 }
                 Text { horizontal-stretch: 1; min-width: 120px; text: root.period-title; color: root.title-color; font-size: TypeScale.heading-small; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                Text { width: 42px; text: root.week-label; color: root.muted-color; font-size: TypeScale.caption; font-weight: 700; vertical-alignment: center; }
+                Text { visible: root.view-mode == "week"; width: root.view-mode == "week" ? 42px : 0px; text: root.week-label; color: root.muted-color; font-size: TypeScale.caption; font-weight: 700; vertical-alignment: center; }
                 ToolbarIconButton {
                     visible: root.sidebar-collapsed;
                     width: root.sidebar-collapsed ? LayoutMetrics.desktop-icon-button-size : 0px;
@@ -544,10 +555,29 @@ export component FunctionalCalendarView inherits Rectangle {
                 ToolbarIconButton { icon: @image-url("../icons/lucide/outline/chevron-right.svg"); icon-color: root.secondary-color; hover-background: root.control-hover-color; tooltip-text: @tr("Next period"); clicked => { root.navigate("period", 1); } }
                 Button { width: 66px; height: LayoutMetrics.sidebar-action-height; text: @tr("Week"); selected: root.view-mode == "week"; clicked => { root.set-view("week"); } }
                 Button { width: 72px; height: LayoutMetrics.sidebar-action-height; text: @tr("Month"); selected: root.view-mode == "month"; clicked => { root.set-view("month"); } }
-                Button { width: 96px; height: LayoutMetrics.sidebar-action-height; text: @tr("Today"); clicked => { root.today(); } }
+                Button { width: 78px; height: LayoutMetrics.sidebar-action-height; text: @tr("Agenda"); selected: root.view-mode == "agenda"; clicked => { root.set-view("agenda"); } }
+                Button { width: 72px; height: LayoutMetrics.sidebar-action-height; text: @tr("Today"); clicked => { root.today(); } }
             }
         }
         Rectangle { x: 0px; y: LayoutMetrics.desktop-mail-toolbar-height - LayoutMetrics.divider-width; height: LayoutMetrics.divider-width; width: parent.width; background: root.ui-border-color; z: 21; }
+
+        if root.view-mode == "agenda": HorizontalBox {
+            y: LayoutMetrics.desktop-mail-toolbar-height;
+            width: parent.width;
+            height: 44px;
+            padding-left: LayoutMetrics.content-inset;
+            padding-right: LayoutMetrics.content-inset;
+            spacing: 10px;
+            cross-axis-alignment: center;
+            Text { text: @tr("Local time · {}", root.timezone); color: root.muted-color; font-size: TypeScale.caption; overflow: elide; horizontal-stretch: 1; }
+            Text { text: @tr("{n} event" | "{n} events" % root.agenda-event-count); color: root.secondary-color; font-size: TypeScale.caption; }
+            CalendarAgendaFilter {
+                filters: root.agenda-filters;
+                filter-count: root.agenda-filter-count;
+                toggled(id, checked) => { root.toggle-agenda-filter(id, checked); }
+                cleared => { root.clear-agenda-filters(); }
+            }
+        }
 
         if root.view-mode == "week" : Rectangle {
             x: 0px;
@@ -692,14 +722,48 @@ export component FunctionalCalendarView inherits Rectangle {
             width: parent.width;
             title: root.month-title;
             background-color: root.surface-color;
-            IconButton { width: LayoutMetrics.touch-target; height: LayoutMetrics.touch-target; icon: @image-url("../icons/lucide/outline/chevron-left.svg"); icon-color: root.secondary-color; idle-background: root.control-color; hover-background: root.control-hover-color; tooltip-text: @tr("Previous month"); accessible-id: "calendar-previous-month"; clicked => { root.navigate("month", -1); } }
-            IconButton { width: LayoutMetrics.touch-target; height: LayoutMetrics.touch-target; icon: @image-url("../icons/lucide/outline/chevron-right.svg"); icon-color: root.secondary-color; idle-background: root.control-color; hover-background: root.control-hover-color; tooltip-text: @tr("Next month"); accessible-id: "calendar-next-month"; clicked => { root.navigate("month", 1); } }
+            IconButton { width: LayoutMetrics.touch-target; height: LayoutMetrics.touch-target; icon: @image-url("../icons/lucide/outline/chevron-left.svg"); icon-color: root.secondary-color; idle-background: root.control-color; hover-background: root.control-hover-color; tooltip-text: @tr("Previous month"); accessible-id: "calendar-previous-month"; clicked => { root.navigate(root.view-mode == "agenda" ? "period" : "month", -1); } }
+            IconButton { width: LayoutMetrics.touch-target; height: LayoutMetrics.touch-target; icon: @image-url("../icons/lucide/outline/chevron-right.svg"); icon-color: root.secondary-color; idle-background: root.control-color; hover-background: root.control-hover-color; tooltip-text: @tr("Next month"); accessible-id: "calendar-next-month"; clicked => { root.navigate(root.view-mode == "agenda" ? "period" : "month", 1); } }
             IconButton { width: LayoutMetrics.touch-target; height: LayoutMetrics.touch-target; icon: @image-url("../icons/lucide/filled/calendar-add.svg"); primary: true; tooltip-text: @tr("New event"); accessible-id: "calendar-new-event"; clicked => { root.new-event(); } }
         }
 
+        HorizontalBox {
+            x: 16px;
+            y: 64px;
+            width: parent.width - 32px;
+            height: LayoutMetrics.touch-target;
+            padding: 0px;
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Button { text: @tr("Month"); height: LayoutMetrics.touch-target; selected: root.view-mode != "agenda"; clicked => { root.set-view("month"); } }
+            Button { text: @tr("Agenda"); height: LayoutMetrics.touch-target; selected: root.view-mode == "agenda"; clicked => { root.set-view("agenda"); } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: @tr("Today"); height: LayoutMetrics.touch-target; clicked => { root.today(); } }
+        }
+        if root.view-mode == "agenda": HorizontalBox {
+            x: 16px;
+            y: 112px;
+            width: parent.width - 32px;
+            height: 48px;
+            padding: 0px;
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Text { text: @tr("Local time · {}", root.timezone); color: root.muted-color; font-size: TypeScale.caption; overflow: elide; horizontal-stretch: 1; }
+            CalendarAgendaFilter {
+                compact: true;
+                filters: root.agenda-filters;
+                filter-count: root.agenda-filter-count;
+                toggled(id, checked) => { root.toggle-agenda-filter(id, checked); }
+                cleared => { root.clear-agenda-filters(); }
+            }
+        }
+        if root.view-mode != "agenda": Rectangle {
+            y: 116px;
+            width: parent.width;
+            height: max(0px, parent.height - 116px);
         Rectangle {
             x: 8px;
-            y: 64px;
+            y: 0px;
             width: parent.width - 16px;
             height: 264px;
             for name[index] in [@tr("Monday initial" => "M"), @tr("Tuesday initial" => "T"), @tr("Wednesday initial" => "W"), @tr("Thursday initial" => "T"), @tr("Friday initial" => "F"), @tr("Saturday initial" => "S"), @tr("Sunday initial" => "S")] : Text {
@@ -742,14 +806,14 @@ export component FunctionalCalendarView inherits Rectangle {
             }
         }
 
-        Rectangle { x: 14px; y: 334px; width: parent.width - 28px; height: 1px; background: root.subtle-border-color; }
-        Text { x: 16px; y: 342px; width: parent.width - 32px; height: 28px; text: @tr("Agenda · {}", root.selected-date); color: root.secondary-color; font-size: TypeScale.secondary; font-weight: 700; vertical-alignment: center; }
+        Rectangle { x: 14px; y: 270px; width: parent.width - 28px; height: 1px; background: root.subtle-border-color; }
+        Text { x: 16px; y: 278px; width: parent.width - 32px; height: 28px; text: @tr("Agenda · {}", root.selected-date); color: root.secondary-color; font-size: TypeScale.secondary; font-weight: 700; vertical-alignment: center; }
 
         agenda-scroll := ScrollView {
             x: 8px;
-            y: 370px;
+            y: 306px;
             width: parent.width - 16px;
-            height: max(0px, parent.height - 378px);
+            height: max(0px, parent.height - 314px);
             content-width: self.visible-width;
             horizontal-scrollbar-policy: always-off;
             mouse-drag-pan-enabled: true;
@@ -782,6 +846,25 @@ export component FunctionalCalendarView inherits Rectangle {
                 }
             }
         }
+        }
+    }
+
+    if root.view-mode == "agenda": CalendarAgenda {
+        x: root.main-x;
+        y: root.compact ? 160px : LayoutMetrics.desktop-mail-toolbar-height + 44px;
+        width: root.main-width;
+        height: max(0px, root.height - self.y);
+        compact: root.compact;
+        rows: root.agenda-rows;
+        event-count: root.agenda-event-count;
+        filter-count: root.agenda-filter-count;
+        anchor: root.agenda-anchor;
+        scroll-request: root.agenda-scroll-request;
+        selected-date: root.selected-date;
+        period-title: root.month-title;
+        event-clicked(event) => { root.show-event(event); }
+        new-event => { root.new-event(); }
+        clear-filters => { root.clear-agenda-filters(); }
     }
 
     CalendarDetailsDialog {

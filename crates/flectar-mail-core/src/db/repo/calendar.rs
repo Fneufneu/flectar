@@ -570,7 +570,7 @@ pub fn list_range(conn: &Connection, start_ms: i64, end_ms: i64) -> Result<Vec<C
            AND (calendar_id IS NULL OR EXISTS (
                 SELECT 1 FROM calendars c WHERE c.id = calendar_events.calendar_id AND c.enabled = 1
            ))
-         ORDER BY starts_at ASC LIMIT 500"
+         ORDER BY starts_at ASC, id ASC"
     ))?;
     let rows = stmt
         .query_map(params![start_ms, end_ms], from_row)?
@@ -586,7 +586,7 @@ pub fn recurring_masters(conn: &Connection, end_ms: i64) -> Result<Vec<SyncRow>>
            AND (calendar_id IS NULL OR EXISTS (
                 SELECT 1 FROM calendars c WHERE c.id = calendar_events.calendar_id AND c.enabled = 1
            ))
-         LIMIT 500"
+         ORDER BY starts_at ASC, id ASC"
     ))?;
     let rows = stmt
         .query_map(params![end_ms], sync_row)?
@@ -755,6 +755,26 @@ mod tests {
             .unwrap();
         assert!(list_range(&c, 0, 10_000).unwrap().is_empty());
         assert!(upcoming_for_notify(&c, 1_000, 5_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn busy_calendar_range_and_recurring_masters_are_not_truncated() {
+        let c = testutil::calendar_conn();
+        for id in 0..650 {
+            c.execute(
+                "INSERT INTO calendar_events (account_id, ical_uid, starts_at, ends_at, rrule)
+                 VALUES (0, ?1, ?2, ?3, 'FREQ=DAILY')",
+                params![
+                    format!("busy-{id}@calendar.example"),
+                    id * 1000,
+                    id * 1000 + 500
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(list_range(&c, 0, 1_000_000).unwrap().len(), 650);
+        assert_eq!(recurring_masters(&c, 1_000_000).unwrap().len(), 650);
+        assert_eq!(list_range(&c, 600_000, 610_000).unwrap().len(), 10);
     }
 
     #[test]

@@ -15,7 +15,8 @@ work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
 cd "$repo_root"
 
-find ui -type f -name '*.slint' -print0 \
+# Preview and screenshot scripts use temporary hidden .slint files.
+find ui -type f -name '*.slint' ! -name '.*' -print0 \
   | sort -z \
   | xargs -0 slint-tr-extractor --no-default-translation-context \
       --package-name flectar-mail --package-version 0.1.0 \

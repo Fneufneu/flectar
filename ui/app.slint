@@ -15,10 +15,11 @@ export { AppTheme, MotionSettings, ThemeUtilities } from "design-system.slint";
 import { AppTheme, LayoutMetrics } from "design-system.slint";
 import { Button } from "components/button.slint";
 import { LoadingSkeletonBlock } from "components/loading-skeleton.slint";
-import { AccountRow, CalendarDay, CalendarEventRow, CalendarSourceRow, CalendarWeekDay, ComposeAttachment, ComposeContact, ComposeEditorTile, ContactSidebarRow, ContactRow, EmailLink, EmailRow, EmailTemplateRow, EmailTile, LocalizedMessage, MailListEntry, MailProfileRow, SidebarRow, MailLabelRow, StorageUsageRow, ThreadMessageRow } from "models.slint";
+import { AccountRow, CalendarAgendaRow, CalendarAgendaFilterRow, CalendarDay, CalendarEventRow, CalendarSourceRow, CalendarWeekDay, ComposeAttachment, ComposeContact, ComposeEditorTile, ContactSidebarRow, ContactRow, EmailLink, EmailRow, EmailTemplateRow, EmailTile, LocalizedMessage, MailListEntry, MailProfileRow, SidebarRow, MailLabelRow, StorageUsageRow, ThreadMessageRow } from "models.slint";
 export { EmailReader, ReaderCaret, ReaderImage, ReaderItem, MailDragApi } from "models.slint";
 export { MailListNavigation, MailNavigationTarget } from "models.slint";
 export { ThreadMessageRow, StorageUsageRow } from "models.slint";
+export { CalendarAgendaNavigation } from "components/calendar-agenda.slint";
 import { FunctionalCalendarView } from "components/calendar.slint";
 import { CompactProductNav, ProductRail } from "components/product-rail.slint";
 import { WorkspaceFrame } from "components/workspace-layout.slint";
@@ -41,6 +42,8 @@ import { OnboardingView } from "views/onboarding-view.slint";
 export global I18n {
     pure callback month-name(int, bool) -> string;
     pure callback weekday-short(int) -> string;
+    pure callback weekday-name(int) -> string;
+    pure callback agenda-date-label(int, int, int) -> string;
     pure callback calendar-all-day() -> string;
     pure callback untitled-event() -> string;
     pure callback no-contact-history() -> string;
@@ -91,6 +94,19 @@ export global I18n {
         if (day == 4) { return @tr("Fri"); }
         if (day == 5) { return @tr("Sat"); }
         return @tr("Sun");
+    }
+
+    weekday-name(day) => {
+        if (day == 0) { return @tr("Monday"); }
+        if (day == 1) { return @tr("Tuesday"); }
+        if (day == 2) { return @tr("Wednesday"); }
+        if (day == 3) { return @tr("Thursday"); }
+        if (day == 4) { return @tr("Friday"); }
+        if (day == 5) { return @tr("Saturday"); }
+        return @tr("Sunday");
+    }
+    agenda-date-label(weekday, day, month) => {
+        return @tr("{} · {} {}", root.weekday-name(weekday), day, root.month-name(month, false));
     }
 
     calendar-all-day() => { return @tr("All day"); }
@@ -306,6 +322,8 @@ export global I18n {
     }
 
     ui-message-calendar(key, argument, second-argument, third-argument) => {
+        if (key == "Local calendar") { return @tr("Local calendar"); }
+        if (key == "Calendar") { return @tr("Calendar"); }
         if (key == "Could not load calendar: {}") { return @tr("Could not load calendar: {}", argument); }
         if (key == "Calendar shown and syncing.") { return @tr("Calendar shown and syncing."); }
         if (key == "Calendar hidden and sync paused.") { return @tr("Calendar hidden and sync paused."); }
@@ -577,6 +595,8 @@ export component AppWindow inherits Window {
     callback calendar-select-date(string);
     callback calendar-set-view(string);
     callback calendar-set-source-enabled(int, bool);
+    callback calendar-toggle-agenda-filter(int, bool);
+    callback calendar-clear-agenda-filters();
     callback calendar-today();
     callback calendar-open-editor();
     callback calendar-edit-event(int);
@@ -643,6 +663,13 @@ export component AppWindow inherits Window {
     in property <[CalendarDay]> calendar_month_days: [];
     in property <[CalendarWeekDay]> calendar_week_days: [];
     in property <[CalendarEventRow]> calendar_events: [];
+    in property <[CalendarAgendaRow]> calendar_agenda_rows: [];
+    in property <[CalendarAgendaFilterRow]> calendar_agenda_filters: [];
+    in property <int> calendar_agenda_filter_count: 0;
+    in property <int> calendar_agenda_event_count: 0;
+    in property <float> calendar_agenda_anchor: 0;
+    in property <int> calendar_agenda_scroll_request: 0;
+    in property <string> calendar_timezone: "";
     in property <[CalendarSourceRow]> calendar_sources: [];
     in property <[ContactRow]> contacts: [];
     in property <[ContactSidebarRow]> contact_sidebar_rows: [];
@@ -1332,6 +1359,13 @@ export component AppWindow inherits Window {
             month-days: root.calendar_month_days;
             week-days: root.calendar_week_days;
             events: root.calendar_events;
+            agenda-rows: root.calendar_agenda_rows;
+            agenda-filters: root.calendar_agenda_filters;
+            agenda-filter-count: root.calendar_agenda_filter_count;
+            agenda-event-count: root.calendar_agenda_event_count;
+            agenda-anchor: root.calendar_agenda_anchor;
+            agenda-scroll-request: root.calendar_agenda_scroll_request;
+            timezone: root.calendar_timezone;
             sources: root.calendar_sources;
             month-title: root.calendar_month_title;
             period-title: root.calendar_period_title;
@@ -1356,6 +1390,8 @@ export component AppWindow inherits Window {
             select-date(date) => { root.calendar-select-date(date); }
             set-view(mode) => { root.calendar-set-view(mode); }
             set-source-enabled(calendar-id, enabled) => { root.calendar-set-source-enabled(calendar-id, enabled); }
+            toggle-agenda-filter(id, checked) => { root.calendar-toggle-agenda-filter(id, checked); }
+            clear-agenda-filters => { root.calendar-clear-agenda-filters(); }
             today => { root.calendar-today(); }
             new-event => { root.calendar-open-editor(); }
             edit-event(event-id) => { root.calendar-edit-event(event-id); }

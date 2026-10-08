@@ -296,6 +296,30 @@ export struct CalendarEventRow {
     source: string,
 }
 
+// A flat model lets ListView virtualize individual events, including busy days.
+export struct CalendarAgendaRow {
+    key: string,
+    kind: string,
+    iso_date: string,
+    date_label: string,
+    is_today: bool,
+    count: int,
+    time_label: string,
+    end_label: string,
+    offset: float,
+    previous_event: int,
+    next_event: int,
+    event: CalendarEventRow,
+}
+
+export struct CalendarAgendaFilterRow {
+    id: int,
+    name: string,
+    account: string,
+    color_index: int,
+    checked: bool,
+}
+
 // Provider calendar collections are kept separate from events so the
 // calendar sidebar can mirror mail's account-aware navigation without
 // inventing local placeholder rows.
